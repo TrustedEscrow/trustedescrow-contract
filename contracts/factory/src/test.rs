@@ -416,10 +416,19 @@ fn proposals_can_be_replaced_and_withdrawn() {
     let (first, second) = (Address::generate(&s.env), Address::generate(&s.env));
     s.factory.propose_admin(&first);
     s.factory.propose_admin(&second);
-    assert_eq!(s.factory.pending_admin(), Some(second));
+    assert_eq!(s.factory.pending_admin(), Some(second.clone()));
 
     s.factory.cancel_admin_transfer();
     assert_signed_by(&s, &s.admin);
+    let expected = AdminTransferCancelled {
+        current: s.admin.clone(),
+        cancelled: second,
+    };
+    assert_eq!(
+        s.events_of(&s.factory.address),
+        std::vec![s.event(&expected)]
+    );
+
     assert_eq!(s.factory.pending_admin(), None);
     assert_err(s.factory.try_accept_admin(), Error::NoPendingAdmin);
     assert_eq!(s.factory.config().admin, s.admin);

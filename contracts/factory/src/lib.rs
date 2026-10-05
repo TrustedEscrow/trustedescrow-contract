@@ -87,6 +87,15 @@ pub struct AdminTransferred {
     pub admin: Address,
 }
 
+#[contractevent(topics = ["adm_cncl"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferCancelled {
+    #[topic]
+    pub current: Address,
+    #[topic]
+    pub cancelled: Address,
+}
+
 #[contract]
 pub struct Factory;
 
@@ -185,12 +194,16 @@ impl Factory {
 
     /// Withdraw a pending proposal.
     pub fn cancel_admin_transfer(env: Env) {
-        Self::config(env.clone()).admin.require_auth();
-        if !env.storage().instance().has(&DataKey::PendingAdmin) {
-            panic_with_error!(&env, Error::NoPendingAdmin);
-        }
+        let current = Self::config(env.clone()).admin;
+        current.require_auth();
+        let cancelled: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingAdmin));
         env.storage().instance().remove(&DataKey::PendingAdmin);
         extend_instance_ttl(&env);
+        AdminTransferCancelled { current, cancelled }.publish(&env);
     }
 
     pub fn pending_admin(env: Env) -> Option<Address> {
