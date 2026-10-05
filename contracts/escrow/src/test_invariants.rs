@@ -65,9 +65,11 @@ enum Op {
     RefundAfterArbitrationTimeout,
     SellerRefund,
     SweepFee,
+    ExtendDelivery,
+    ExtendReceipt,
 }
 
-const ALL_OPS: [Op; 13] = [
+const ALL_OPS: [Op; 15] = [
     Op::Fund,
     Op::Cancel,
     Op::SubmitProof,
@@ -81,6 +83,8 @@ const ALL_OPS: [Op; 13] = [
     Op::RefundAfterArbitrationTimeout,
     Op::SellerRefund,
     Op::SweepFee,
+    Op::ExtendDelivery,
+    Op::ExtendReceipt,
 ];
 
 /// Calls that can plausibly succeed from `state`. Timeouts appear even though
@@ -94,6 +98,7 @@ fn relevant(state: State) -> &'static [Op] {
             Op::Dispute,
             Op::RefundAfterDeliveryTimeout,
             Op::SellerRefund,
+            Op::ExtendDelivery,
         ],
         State::Delivered => &[
             Op::ReleaseWithCode,
@@ -101,6 +106,7 @@ fn relevant(state: State) -> &'static [Op] {
             Op::Dispute,
             Op::Escalate,
             Op::SellerRefund,
+            Op::ExtendReceipt,
         ],
         State::Disputed => &[
             Op::Resolve,
@@ -237,6 +243,16 @@ impl World<'_> {
             }
             Op::SellerRefund => succeeded(self.escrow.try_seller_refund()),
             Op::SweepFee => succeeded(self.escrow.try_sweep_fee()),
+            Op::ExtendDelivery => {
+                // Sometimes equal to the current deadline (correctly
+                // rejected), usually later (accepted).
+                let new_deadline = self.escrow.get().delivery_deadline + rng.below(2 * DAY);
+                succeeded(self.escrow.try_extend_delivery(&new_deadline))
+            }
+            Op::ExtendReceipt => {
+                let new_deadline = self.escrow.get().receipt_deadline + rng.below(2 * DAY);
+                succeeded(self.escrow.try_extend_receipt(&new_deadline))
+            }
         }
     }
 

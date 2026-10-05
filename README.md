@@ -42,6 +42,8 @@ Cancelled        Refunded ◀── delivery      Disputed ──resolve──�
                  timeout / seller_refund      └── arbitration deadline ──▶ Refunded
 ```
 
+Either deadline can be pushed later without changing state: the buyer calls `extend_delivery` while `Funded`, the seller calls `extend_receipt` while `Delivered`. Each only ever benefits the other side — a seller who's running late gets more time to deliver because the buyer chose to wait, and a buyer who needs more time to check the goods gets it because the seller chose to wait — and neither can push a deadline earlier or past the one-year window cap.
+
 ## Delivery codes
 
 A delivery code is 80 bits of entropy written as 16 Crockford base32 characters and shown as `K7M2-9XQF-4TBN-R3WD`. The escrow stores `sha256` of the 16 canonical characters. Because that hash is public, the code's length is its only defence against brute force: never generate shorter codes.
