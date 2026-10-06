@@ -138,6 +138,18 @@ impl Setup<'_> {
         BytesN::from_array(&self.env, &[7; 32])
     }
 
+    fn statement_hash(&self) -> BytesN<32> {
+        BytesN::from_array(&self.env, &[9; 32])
+    }
+
+    fn ruling_hash(&self) -> BytesN<32> {
+        BytesN::from_array(&self.env, &[8; 32])
+    }
+
+    fn zero_hash(&self) -> BytesN<32> {
+        BytesN::from_array(&self.env, &[0; 32])
+    }
+
     fn deliver(&self) {
         self.escrow
             .submit_proof(&ProofKind::Tracking, &self.uri(TRACKING_URI), &self.hash());
@@ -195,10 +207,14 @@ impl Setup<'_> {
             Error::InvalidState,
         );
         assert_err(self.escrow.try_confirm(), Error::InvalidState);
-        assert_err(self.escrow.try_dispute(&self.buyer), Error::InvalidState);
+        assert_err(
+            self.escrow.try_dispute(&self.buyer, &self.statement_hash()),
+            Error::InvalidState,
+        );
         assert_err(self.escrow.try_escalate(), Error::InvalidState);
         assert_err(
-            self.escrow.try_resolve(&Outcome::Refund),
+            self.escrow
+                .try_resolve(&Outcome::Refund, &self.ruling_hash()),
             Error::InvalidState,
         );
         assert_err(
@@ -692,14 +708,27 @@ fn silent_buyer_escalates_instead_of_paying_seller() {
     assert_eq!(dispute.opened_by, DisputeOrigin::ReceiptTimeout);
     assert_eq!(dispute.from_state, State::Delivered);
     assert_eq!(dispute.deadline, receipt_deadline + ARBITRATION_WINDOW);
+    // No statement to commit on a timeout, and no ruling yet.
+    assert_eq!(dispute.statement_hash, s.zero_hash());
+    assert_eq!(dispute.ruling_hash, s.zero_hash());
     assert_eq!(s.balance(&s.seller), 0);
     assert_eq!(s.balance(&s.escrow.address), AMOUNT);
 }
 
 #[test]
+fn dispute_commits_the_opener_statement_hash() {
+    let s = setup().delivered();
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+    let dispute = s.get().dispute().unwrap();
+    assert_eq!(dispute.statement_hash, s.statement_hash());
+    // No ruling yet.
+    assert_eq!(dispute.ruling_hash, s.zero_hash());
+}
+
+#[test]
 fn code_is_not_an_automatic_release_once_disputed() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.buyer);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
     assert_err(
         s.escrow.try_release_with_code(&s.code()),
         Error::InvalidState,
@@ -713,7 +742,10 @@ fn escalate_then_dispute_in_same_ledger() {
     let s = setup().delivered();
     s.at(s.get().receipt_deadline);
     s.escrow.escalate();
-    assert_err(s.escrow.try_dispute(&s.buyer), Error::InvalidState);
+    assert_err(
+        s.escrow.try_dispute(&s.buyer, &s.statement_hash()),
+        Error::InvalidState,
+    );
     assert_eq!(
         s.get().dispute().unwrap().opened_by,
         DisputeOrigin::ReceiptTimeout
@@ -724,7 +756,7 @@ fn escalate_then_dispute_in_same_ledger() {
 fn dispute_then_escalate_in_same_ledger() {
     let s = setup().delivered();
     s.at(s.get().receipt_deadline);
-    s.escrow.dispute(&s.seller);
+    s.escrow.dispute(&s.seller, &s.statement_hash());
     assert_err(s.escrow.try_escalate(), Error::InvalidState);
     assert_eq!(s.get().dispute().unwrap().opened_by, DisputeOrigin::Seller);
 }
@@ -732,7 +764,7 @@ fn dispute_then_escalate_in_same_ledger() {
 #[test]
 fn either_party_can_dispute_from_funded_before_delivery_deadline() {
     let s = setup().funded();
-    s.escrow.dispute(&s.seller);
+    s.escrow.dispute(&s.seller, &s.statement_hash());
     s.assert_only_auth(&s.seller);
     let dispute = s.get().dispute().unwrap();
     assert_eq!(dispute.opened_by, DisputeOrigin::Seller);
@@ -743,7 +775,10 @@ fn either_party_can_dispute_from_funded_before_delivery_deadline() {
 fn stranger_cannot_dispute() {
     let s = setup().delivered();
     let stranger = Address::generate(&s.env);
-    assert_err(s.escrow.try_dispute(&stranger), Error::NotParticipant);
+    assert_err(
+        s.escrow.try_dispute(&stranger, &s.statement_hash()),
+        Error::NotParticipant,
+    );
 }
 
 // --- Events ------------------------------------------------------------------
@@ -795,6 +830,7 @@ fn code_release_emits_released_with_fee_split() {
         path: ReleasePath::Code,
         payout: AMOUNT - FEE,
         fee: FEE,
+        ruling_hash: s.zero_hash(),
     };
     assert_eq!(s.escrow_events(), std::vec![s.event(&expected)]);
 }
@@ -813,6 +849,7 @@ fn proof_with_code_emits_proof_then_release() {
         path: ReleasePath::Code,
         payout: AMOUNT - FEE,
         fee: FEE,
+        ruling_hash: s.zero_hash(),
     };
     assert_eq!(
         s.escrow_events(),
@@ -829,6 +866,7 @@ fn escalation_emits_disputed_with_receipt_timeout_origin() {
     let expected = Disputed {
         opened_by: DisputeOrigin::ReceiptTimeout,
         deadline: receipt_deadline + ARBITRATION_WINDOW,
+        statement_hash: s.zero_hash(),
     };
     assert_eq!(s.escrow_events(), std::vec![s.event(&expected)]);
 }
@@ -840,6 +878,7 @@ fn refund_emits_refunded_with_path_and_full_amount() {
     let expected = Refunded {
         path: RefundPath::SellerRefund,
         amount: AMOUNT,
+        ruling_hash: s.zero_hash(),
     };
     assert_eq!(s.escrow_events(), std::vec![s.event(&expected)]);
 }
@@ -870,7 +909,7 @@ fn rejected_call_emits_nothing() {
 #[test]
 fn dispute_landing_before_code_blocks_the_release() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.buyer);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
     assert_err(
         s.escrow.try_release_with_code(&s.code()),
         Error::InvalidState,
@@ -883,7 +922,10 @@ fn dispute_landing_before_code_blocks_the_release() {
 fn code_landing_before_dispute_settles_first() {
     let s = setup().delivered();
     s.escrow.release_with_code(&s.code());
-    assert_err(s.escrow.try_dispute(&s.buyer), Error::InvalidState);
+    assert_err(
+        s.escrow.try_dispute(&s.buyer, &s.statement_hash()),
+        Error::InvalidState,
+    );
     s.assert_seller_paid();
 }
 
@@ -1016,7 +1058,7 @@ fn seller_can_refund_from_any_open_state() {
             s.deliver();
         }
         if stage == 2 {
-            s.escrow.dispute(&s.buyer);
+            s.escrow.dispute(&s.buyer, &s.statement_hash());
         }
         s.escrow.seller_refund();
         s.assert_only_auth(&s.seller);
@@ -1056,8 +1098,14 @@ fn undelivered_escrow_refunds_buyer_at_delivery_deadline() {
 fn nobody_can_dispute_from_funded_after_delivery_deadline() {
     let s = setup().funded();
     s.at(s.get().delivery_deadline);
-    assert_err(s.escrow.try_dispute(&s.seller), Error::DeadlinePassed);
-    assert_err(s.escrow.try_dispute(&s.buyer), Error::DeadlinePassed);
+    assert_err(
+        s.escrow.try_dispute(&s.seller, &s.statement_hash()),
+        Error::DeadlinePassed,
+    );
+    assert_err(
+        s.escrow.try_dispute(&s.buyer, &s.statement_hash()),
+        Error::DeadlinePassed,
+    );
     s.escrow.refund_after_delivery_timeout();
     s.assert_buyer_refunded();
 }
@@ -1188,8 +1236,8 @@ fn extensions_emit_extended_with_the_kind_and_new_deadline() {
 #[test]
 fn arbitrator_can_release() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.buyer);
-    s.escrow.resolve(&Outcome::Release);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+    s.escrow.resolve(&Outcome::Release, &s.ruling_hash());
     s.assert_only_auth(&s.arbitrator);
     s.assert_seller_paid();
     assert_eq!(s.get().released_via(), Some(ReleasePath::Arbitration));
@@ -1198,16 +1246,75 @@ fn arbitrator_can_release() {
 #[test]
 fn arbitrator_refund_returns_full_amount_without_fee() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.seller);
-    s.escrow.resolve(&Outcome::Refund);
+    s.escrow.dispute(&s.seller, &s.statement_hash());
+    s.escrow.resolve(&Outcome::Refund, &s.ruling_hash());
     s.assert_buyer_refunded();
     assert_eq!(s.get().refunded_via(), Some(RefundPath::Arbitration));
 }
 
 #[test]
+fn resolve_commits_the_ruling_hash_on_the_dispute_record_and_the_event() {
+    let s = setup().delivered();
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+    s.escrow.resolve(&Outcome::Release, &s.ruling_hash());
+
+    // Events only live for the invocation that produced them in this test
+    // harness, so check them before any further (read-only) calls clear
+    // the log.
+    let expected = Released {
+        path: ReleasePath::Arbitration,
+        payout: AMOUNT - FEE,
+        fee: FEE,
+        ruling_hash: s.ruling_hash(),
+    };
+    assert_eq!(s.escrow_events(), std::vec![s.event(&expected)]);
+
+    // The dispute record itself now carries the ruling, alongside the
+    // statement it was opened with.
+    let dispute = s.get().dispute().unwrap();
+    assert_eq!(dispute.statement_hash, s.statement_hash());
+    assert_eq!(dispute.ruling_hash, s.ruling_hash());
+}
+
+#[test]
+fn a_non_arbitration_release_carries_a_zero_ruling_hash() {
+    let s = setup().delivered();
+    s.escrow.release_with_code(&s.code());
+    let expected = Released {
+        path: ReleasePath::Code,
+        payout: AMOUNT - FEE,
+        fee: FEE,
+        ruling_hash: s.zero_hash(),
+    };
+    assert_eq!(s.escrow_events(), std::vec![s.event(&expected)]);
+    assert_eq!(s.get().dispute(), None);
+}
+
+#[test]
+fn the_arbitration_timeout_refund_carries_a_zero_ruling_hash_since_no_ruling_ever_happened() {
+    let s = setup().delivered();
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+    let deadline = s.get().dispute().unwrap().deadline;
+    s.at(deadline);
+    s.escrow.refund_after_arbitration_timeout();
+
+    let expected = Refunded {
+        path: RefundPath::ArbitrationTimeout,
+        amount: AMOUNT,
+        ruling_hash: s.zero_hash(),
+    };
+    assert_eq!(s.escrow_events(), std::vec![s.event(&expected)]);
+
+    // The statement is still on record; there was just never a ruling.
+    let dispute = s.get().dispute().unwrap();
+    assert_eq!(dispute.statement_hash, s.statement_hash());
+    assert_eq!(dispute.ruling_hash, s.zero_hash());
+}
+
+#[test]
 fn only_the_arbitrator_can_resolve() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.buyer);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
     for impostor in [&s.buyer, &s.seller] {
         s.env.mock_auths(&[MockAuth {
             address: impostor,
@@ -1218,7 +1325,10 @@ fn only_the_arbitrator_can_resolve() {
                 sub_invokes: &[],
             },
         }]);
-        assert!(s.escrow.try_resolve(&Outcome::Release).is_err());
+        assert!(s
+            .escrow
+            .try_resolve(&Outcome::Release, &s.ruling_hash())
+            .is_err());
     }
     s.env.mock_all_auths();
     assert_eq!(s.state(), State::Disputed);
@@ -1228,7 +1338,7 @@ fn only_the_arbitrator_can_resolve() {
 #[test]
 fn arbitration_deadline_refunds_buyer() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.buyer);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
     let deadline = s.get().dispute().unwrap().deadline;
 
     s.at(deadline - 1);
@@ -1239,7 +1349,7 @@ fn arbitration_deadline_refunds_buyer() {
 
     s.at(deadline);
     assert_err(
-        s.escrow.try_resolve(&Outcome::Release),
+        s.escrow.try_resolve(&Outcome::Release, &s.ruling_hash()),
         Error::DeadlinePassed,
     );
     s.escrow.refund_after_arbitration_timeout();
@@ -1251,16 +1361,22 @@ fn arbitration_deadline_refunds_buyer() {
 #[test]
 fn resolve_twice_is_rejected() {
     let s = setup().delivered();
-    s.escrow.dispute(&s.buyer);
-    s.escrow.resolve(&Outcome::Release);
-    assert_err(s.escrow.try_resolve(&Outcome::Refund), Error::InvalidState);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+    s.escrow.resolve(&Outcome::Release, &s.ruling_hash());
+    assert_err(
+        s.escrow.try_resolve(&Outcome::Refund, &s.ruling_hash()),
+        Error::InvalidState,
+    );
     s.assert_seller_paid();
 }
 
 #[test]
 fn resolve_outside_dispute_is_rejected() {
     let s = setup().delivered();
-    assert_err(s.escrow.try_resolve(&Outcome::Release), Error::InvalidState);
+    assert_err(
+        s.escrow.try_resolve(&Outcome::Release, &s.ruling_hash()),
+        Error::InvalidState,
+    );
     assert_err(
         s.escrow.try_refund_after_arbitration_timeout(),
         Error::InvalidState,
@@ -1303,8 +1419,8 @@ fn seller_without_authorization_blocks_release_but_the_buyer_can_still_be_refund
     assert_eq!(s.state(), State::Delivered);
 
     // The buyer still has an exit: dispute, and the arbitrator refunds.
-    s.escrow.dispute(&s.buyer);
-    s.escrow.resolve(&Outcome::Refund);
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+    s.escrow.resolve(&Outcome::Refund, &s.ruling_hash());
     s.assert_buyer_refunded();
 }
 

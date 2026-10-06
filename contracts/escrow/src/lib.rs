@@ -82,6 +82,7 @@ pub struct ProofSubmitted {
 pub struct Disputed {
     pub opened_by: DisputeOrigin,
     pub deadline: u64,
+    pub statement_hash: BytesN<32>,
 }
 
 #[contractevent(topics = ["released"])]
@@ -90,6 +91,9 @@ pub struct Released {
     pub path: ReleasePath,
     pub payout: i128,
     pub fee: i128,
+    /// sha256 of the arbitrator's ruling if `path` is `Arbitration`, zero
+    /// otherwise.
+    pub ruling_hash: BytesN<32>,
 }
 
 #[contractevent(topics = ["refunded"])]
@@ -97,6 +101,10 @@ pub struct Released {
 pub struct Refunded {
     pub path: RefundPath,
     pub amount: i128,
+    /// sha256 of the arbitrator's ruling if `path` is `Arbitration`, zero
+    /// otherwise (including `ArbitrationTimeout`, where the arbitrator
+    /// never ruled at all).
+    pub ruling_hash: BytesN<32>,
 }
 
 #[contractevent(topics = ["cancelled"])]
@@ -306,7 +314,8 @@ impl EscrowContract {
             receipt_deadline: now,
         }
         .publish(&env);
-        release(&env, e, ReleasePath::Code);
+        let zero = zero_hash(&env);
+        release(&env, e, ReleasePath::Code, zero);
     }
 
     /// Release on the buyer's delivery code. Callable by anyone holding it, but
@@ -319,7 +328,8 @@ impl EscrowContract {
             _ => panic_with_error!(&env, Error::InvalidState),
         }
         verify_code(&env, &e, &code);
-        release(&env, e, ReleasePath::Code);
+        let zero = zero_hash(&env);
+        release(&env, e, ReleasePath::Code, zero);
     }
 
     /// Buyer confirms receipt with their own signature — the fallback for a
@@ -332,13 +342,15 @@ impl EscrowContract {
             _ => panic_with_error!(&env, Error::InvalidState),
         }
         e.buyer.require_auth();
-        release(&env, e, ReleasePath::Confirmation);
+        let zero = zero_hash(&env);
+        release(&env, e, ReleasePath::Confirmation, zero);
     }
 
-    /// Either party hands the escrow to the arbitrator. From `Funded` this is
-    /// closed once `delivery_deadline` passes, so a seller cannot block the
-    /// buyer's refund.
-    pub fn dispute(env: Env, caller: Address) {
+    /// Either party hands the escrow to the arbitrator, committing the
+    /// sha256 of their off-chain statement so it can't be rewritten after
+    /// the fact. From `Funded` this is closed once `delivery_deadline`
+    /// passes, so a seller cannot block the buyer's refund.
+    pub fn dispute(env: Env, caller: Address, statement_hash: BytesN<32>) {
         caller.require_auth();
         let e = load(&env);
         let origin = if caller == e.buyer {
@@ -357,32 +369,39 @@ impl EscrowContract {
             State::Delivered => {}
             _ => panic_with_error!(&env, Error::InvalidState),
         }
-        open_dispute(&env, e, origin);
+        open_dispute(&env, e, origin, statement_hash);
     }
 
     /// The buyer gave neither receipt nor objection by `receipt_deadline`.
     /// Anyone may hand the escrow to the arbitrator. This is the path that
-    /// replaces paying the seller on a timeout.
+    /// replaces paying the seller on a timeout. There's no statement to
+    /// commit here, so `statement_hash` is zero.
     pub fn escalate(env: Env) {
         let e = load(&env);
         require_state(&env, &e, State::Delivered);
         if now(&env) < e.receipt_deadline {
             panic_with_error!(&env, Error::DeadlineNotReached);
         }
-        open_dispute(&env, e, DisputeOrigin::ReceiptTimeout);
+        let zero = zero_hash(&env);
+        open_dispute(&env, e, DisputeOrigin::ReceiptTimeout, zero);
     }
 
-    /// Arbitrator chooses one of two outcomes, before the arbitration deadline.
-    pub fn resolve(env: Env, outcome: Outcome) {
-        let e = load(&env);
+    /// Arbitrator chooses one of two outcomes, before the arbitration
+    /// deadline, committing the sha256 of their written ruling so it's
+    /// fixed alongside the outcome rather than just asserted afterwards.
+    pub fn resolve(env: Env, outcome: Outcome, ruling_hash: BytesN<32>) {
+        let mut e = load(&env);
         let deadline = dispute_deadline(&env, &e);
         e.arbitrator.require_auth();
         if now(&env) >= deadline {
             panic_with_error!(&env, Error::DeadlinePassed);
         }
+        if let DisputeRecord::Opened(d) = &mut e.dispute {
+            d.ruling_hash = ruling_hash.clone();
+        }
         match outcome {
-            Outcome::Release => release(&env, e, ReleasePath::Arbitration),
-            Outcome::Refund => refund(&env, e, RefundPath::Arbitration),
+            Outcome::Release => release(&env, e, ReleasePath::Arbitration, ruling_hash),
+            Outcome::Refund => refund(&env, e, RefundPath::Arbitration, ruling_hash),
         }
     }
 
@@ -393,17 +412,20 @@ impl EscrowContract {
         if now(&env) < e.delivery_deadline {
             panic_with_error!(&env, Error::DeadlineNotReached);
         }
-        refund(&env, e, RefundPath::DeliveryTimeout);
+        let zero = zero_hash(&env);
+        refund(&env, e, RefundPath::DeliveryTimeout, zero);
     }
 
-    /// The arbitrator never ruled. Anyone may refund the buyer.
+    /// The arbitrator never ruled. Anyone may refund the buyer. There's no
+    /// ruling to commit here — that's the point of this path.
     pub fn refund_after_arbitration_timeout(env: Env) {
         let e = load(&env);
         let deadline = dispute_deadline(&env, &e);
         if now(&env) < deadline {
             panic_with_error!(&env, Error::DeadlineNotReached);
         }
-        refund(&env, e, RefundPath::ArbitrationTimeout);
+        let zero = zero_hash(&env);
+        refund(&env, e, RefundPath::ArbitrationTimeout, zero);
     }
 
     /// Seller returns the funds voluntarily. Only ever benefits the buyer.
@@ -414,7 +436,8 @@ impl EscrowContract {
             _ => panic_with_error!(&env, Error::InvalidState),
         }
         e.seller.require_auth();
-        refund(&env, e, RefundPath::SellerRefund);
+        let zero = zero_hash(&env);
+        refund(&env, e, RefundPath::SellerRefund, zero);
     }
 
     /// Give the seller more time to deliver. Only the buyer can call this,
@@ -563,7 +586,11 @@ fn validate_uri(env: &Env, kind: ProofKind, uri: &String) {
     }
 }
 
-fn open_dispute(env: &Env, mut e: Escrow, origin: DisputeOrigin) {
+fn zero_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[0; 32])
+}
+
+fn open_dispute(env: &Env, mut e: Escrow, origin: DisputeOrigin, statement_hash: BytesN<32>) {
     let now = now(env);
     let deadline = add(env, now, e.arbitration_window);
     e.dispute = DisputeRecord::Opened(Dispute {
@@ -571,17 +598,20 @@ fn open_dispute(env: &Env, mut e: Escrow, origin: DisputeOrigin) {
         opened_at: now,
         from_state: e.state,
         deadline,
+        statement_hash: statement_hash.clone(),
+        ruling_hash: zero_hash(env),
     });
     e.state = State::Disputed;
     save(env, &e);
     Disputed {
         opened_by: origin,
         deadline,
+        statement_hash,
     }
     .publish(env);
 }
 
-fn release(env: &Env, mut e: Escrow, path: ReleasePath) {
+fn release(env: &Env, mut e: Escrow, path: ReleasePath, ruling_hash: BytesN<32>) {
     let fee = e
         .amount
         .checked_mul(e.fee_bps as i128)
@@ -608,10 +638,16 @@ fn release(env: &Env, mut e: Escrow, path: ReleasePath) {
     e.unswept_fee = if fee_sent { 0 } else { fee };
     save(env, &e);
 
-    Released { path, payout, fee }.publish(env);
+    Released {
+        path,
+        payout,
+        fee,
+        ruling_hash,
+    }
+    .publish(env);
 }
 
-fn refund(env: &Env, mut e: Escrow, path: RefundPath) {
+fn refund(env: &Env, mut e: Escrow, path: RefundPath, ruling_hash: BytesN<32>) {
     e.state = State::Refunded;
     e.settlement = Settlement::Refunded(path);
     save(env, &e);
@@ -624,6 +660,7 @@ fn refund(env: &Env, mut e: Escrow, path: RefundPath) {
     Refunded {
         path,
         amount: e.amount,
+        ruling_hash,
     }
     .publish(env);
 }
