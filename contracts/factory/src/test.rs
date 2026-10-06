@@ -54,7 +54,13 @@ fn setup<'a>() -> Setup<'a> {
         },),
     );
     let factory = FactoryClient::new(&env, &id);
-    factory.allow_token(&token, &true);
+    factory.allow_token(
+        &token,
+        &Some(TokenLimits {
+            min_amount: 1,
+            max_amount: i128::MAX,
+        }),
+    );
 
     Setup {
         env,
@@ -100,6 +106,15 @@ impl Setup<'_> {
 
     fn salt(&self, n: u8) -> BytesN<32> {
         BytesN::from_array(&self.env, &[n; 32])
+    }
+
+    /// Limits wide enough that `AMOUNT` (and any amount a test picks) always
+    /// clears them — tests that care about the bounds set their own.
+    fn wide_limits(&self) -> Option<TokenLimits> {
+        Some(TokenLimits {
+            min_amount: 1,
+            max_amount: i128::MAX,
+        })
     }
 
     fn escrow(&self, address: &Address) -> escrow_wasm::Client<'_> {
@@ -278,9 +293,90 @@ fn create_rejects_token_not_on_allowlist() {
 }
 
 #[test]
+fn amount_at_either_limit_is_accepted() {
+    let s = setup();
+    s.factory.allow_token(
+        &s.token,
+        &Some(TokenLimits {
+            min_amount: 100,
+            max_amount: 200,
+        }),
+    );
+    let mut low = s.order(&Address::generate(&s.env));
+    low.amount = 100;
+    s.factory.create(&low, &s.salt(1));
+
+    let mut high = s.order(&Address::generate(&s.env));
+    high.amount = 200;
+    s.factory.create(&high, &s.salt(2));
+}
+
+#[test]
+fn amount_outside_the_limits_is_rejected() {
+    let s = setup();
+    s.factory.allow_token(
+        &s.token,
+        &Some(TokenLimits {
+            min_amount: 100,
+            max_amount: 200,
+        }),
+    );
+    let mut too_small = s.order(&Address::generate(&s.env));
+    too_small.amount = 99;
+    assert_err(
+        s.factory.try_create(&too_small, &s.salt(1)),
+        Error::AmountTooSmall,
+    );
+
+    let mut too_large = s.order(&Address::generate(&s.env));
+    too_large.amount = 201;
+    assert_err(
+        s.factory.try_create(&too_large, &s.salt(2)),
+        Error::AmountTooLarge,
+    );
+}
+
+#[test]
+fn invalid_limits_are_rejected() {
+    let s = setup();
+    assert_err(
+        s.factory.try_allow_token(
+            &s.token,
+            &Some(TokenLimits {
+                min_amount: 0,
+                max_amount: 100,
+            }),
+        ),
+        Error::InvalidTokenLimits,
+    );
+    assert_err(
+        s.factory.try_allow_token(
+            &s.token,
+            &Some(TokenLimits {
+                min_amount: -1,
+                max_amount: 100,
+            }),
+        ),
+        Error::InvalidTokenLimits,
+    );
+    assert_err(
+        s.factory.try_allow_token(
+            &s.token,
+            &Some(TokenLimits {
+                min_amount: 101,
+                max_amount: 100,
+            }),
+        ),
+        Error::InvalidTokenLimits,
+    );
+    // The existing, valid limits from setup() are untouched.
+    assert_eq!(s.factory.token_limits(&s.token), s.wide_limits());
+}
+
+#[test]
 fn removed_token_can_no_longer_be_used() {
     let s = setup();
-    s.factory.allow_token(&s.token, &false);
+    s.factory.allow_token(&s.token, &None);
     assert!(!s.factory.is_token_allowed(&s.token));
     let order = s.order(&Address::generate(&s.env));
     assert_err(
@@ -345,7 +441,7 @@ fn fee_above_cap_is_rejected() {
 fn admin_signs_allowlist_changes() {
     let s = setup();
     let token = Address::generate(&s.env);
-    s.factory.allow_token(&token, &true);
+    s.factory.allow_token(&token, &s.wide_limits());
     let auths = s.env.auths();
     assert_eq!(auths.len(), 1);
     assert_eq!(auths[0].0, s.admin);
@@ -417,11 +513,21 @@ fn set_config_emits_config_updated() {
 #[test]
 fn allowlist_changes_emit_token_allowed() {
     let s = setup();
-    for allowed in [false, true] {
-        s.factory.allow_token(&s.token, &allowed);
-        let expected = TokenAllowed {
-            token: s.token.clone(),
-            allowed,
+    for limits in [None, s.wide_limits()] {
+        s.factory.allow_token(&s.token, &limits);
+        let expected = match limits {
+            Some(l) => TokenAllowed {
+                token: s.token.clone(),
+                allowed: true,
+                min_amount: l.min_amount,
+                max_amount: l.max_amount,
+            },
+            None => TokenAllowed {
+                token: s.token.clone(),
+                allowed: false,
+                min_amount: 0,
+                max_amount: 0,
+            },
         };
         assert_eq!(
             s.events_of(&s.factory.address),
@@ -433,7 +539,7 @@ fn allowlist_changes_emit_token_allowed() {
 #[test]
 fn rejected_create_emits_nothing() {
     let s = setup();
-    s.factory.allow_token(&s.token, &false);
+    s.factory.allow_token(&s.token, &None);
     let order = s.order(&Address::generate(&s.env));
     assert!(s.factory.try_create(&order, &s.salt(1)).is_err());
     assert!(s.events_of(&s.factory.address).is_empty());
@@ -475,7 +581,8 @@ fn admin_transfer_takes_effect_only_on_acceptance() {
     assert_eq!(s.factory.pending_admin(), None);
 
     // The new admin now signs configuration changes.
-    s.factory.allow_token(&Address::generate(&s.env), &true);
+    s.factory
+        .allow_token(&Address::generate(&s.env), &s.wide_limits());
     assert_signed_by(&s, &next);
 }
 
@@ -492,10 +599,19 @@ fn proposals_can_be_replaced_and_withdrawn() {
     let (first, second) = (Address::generate(&s.env), Address::generate(&s.env));
     s.factory.propose_admin(&first);
     s.factory.propose_admin(&second);
-    assert_eq!(s.factory.pending_admin(), Some(second));
+    assert_eq!(s.factory.pending_admin(), Some(second.clone()));
 
     s.factory.cancel_admin_transfer();
     assert_signed_by(&s, &s.admin);
+    let expected = AdminTransferCancelled {
+        current: s.admin.clone(),
+        cancelled: second,
+    };
+    assert_eq!(
+        s.events_of(&s.factory.address),
+        std::vec![s.event(&expected)]
+    );
+
     assert_eq!(s.factory.pending_admin(), None);
     assert_err(s.factory.try_accept_admin(), Error::NoPendingAdmin);
     assert_eq!(s.factory.config().admin, s.admin);

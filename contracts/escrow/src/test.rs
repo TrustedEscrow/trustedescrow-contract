@@ -210,6 +210,16 @@ impl Setup<'_> {
             Error::InvalidState,
         );
         assert_err(self.escrow.try_seller_refund(), Error::InvalidState);
+        assert_err(
+            self.escrow
+                .try_extend_delivery(&(self.get().delivery_deadline + DAY)),
+            Error::InvalidState,
+        );
+        assert_err(
+            self.escrow
+                .try_extend_receipt(&(self.get().receipt_deadline + DAY)),
+            Error::InvalidState,
+        );
     }
 
     /// The escrow's own events from the last invocation, in emission order.
@@ -1059,6 +1069,117 @@ fn delivered_escrow_has_no_delivery_timeout() {
     assert_err(
         s.escrow.try_refund_after_delivery_timeout(),
         Error::InvalidState,
+    );
+}
+
+// --- Extending deadlines -------------------------------------------------------
+
+#[test]
+fn buyer_can_extend_the_delivery_deadline() {
+    let s = setup().funded();
+    let original = s.get().delivery_deadline;
+    s.escrow.extend_delivery(&(original + DAY));
+    s.assert_only_auth(&s.buyer);
+    assert_eq!(s.get().delivery_deadline, original + DAY);
+
+    // A seller who was about to time out can still deliver.
+    s.at(original);
+    s.deliver();
+    assert_eq!(s.state(), State::Delivered);
+}
+
+#[test]
+fn seller_can_extend_the_receipt_deadline() {
+    let s = setup().delivered();
+    let original = s.get().receipt_deadline;
+    s.escrow.extend_receipt(&(original + DAY));
+    s.assert_only_auth(&s.seller);
+    assert_eq!(s.get().receipt_deadline, original + DAY);
+
+    // Escalation that would have been due is no longer due.
+    s.at(original);
+    assert_err(s.escrow.try_escalate(), Error::DeadlineNotReached);
+}
+
+#[test]
+fn an_extension_can_only_push_the_deadline_later() {
+    let s = setup().funded();
+    let deadline = s.get().delivery_deadline;
+    assert_err(
+        s.escrow.try_extend_delivery(&deadline),
+        Error::InvalidWindow,
+    );
+    assert_err(
+        s.escrow.try_extend_delivery(&(deadline - 1)),
+        Error::InvalidWindow,
+    );
+}
+
+#[test]
+fn an_extension_is_bounded_by_the_maximum_window() {
+    let s = setup().funded();
+    let too_far = START + MAX_WINDOW + 1;
+    assert_err(s.escrow.try_extend_delivery(&too_far), Error::InvalidWindow);
+    // The boundary itself is fine.
+    s.escrow.extend_delivery(&(START + MAX_WINDOW));
+}
+
+#[test]
+fn extend_delivery_needs_funded_extend_receipt_needs_delivered() {
+    // extend_receipt makes no sense before proof exists.
+    let funded = setup().funded();
+    assert_err(
+        funded
+            .escrow
+            .try_extend_receipt(&(funded.get().delivery_deadline + DAY)),
+        Error::InvalidState,
+    );
+
+    // extend_delivery makes no sense once delivery has already happened.
+    let delivered = setup().delivered();
+    assert_err(
+        delivered
+            .escrow
+            .try_extend_delivery(&(delivered.get().delivery_deadline + DAY)),
+        Error::InvalidState,
+    );
+}
+
+#[test]
+fn a_buyer_can_extend_delivery_even_after_the_old_deadline_passed() {
+    // Choosing to keep waiting is the buyer's call to make, the same as
+    // accepting a late code handover already is in submit_proof_with_code.
+    // Nobody has claimed the delivery timeout yet, so there's still
+    // something here for the buyer to extend.
+    let s = setup().funded();
+    let original = s.get().delivery_deadline;
+    s.at(original + DAY);
+    s.escrow.extend_delivery(&(original + 2 * DAY));
+    assert_eq!(s.get().delivery_deadline, original + 2 * DAY);
+}
+
+#[test]
+fn extensions_emit_extended_with_the_kind_and_new_deadline() {
+    let s = setup().funded();
+    let new_delivery = s.get().delivery_deadline + DAY;
+    s.escrow.extend_delivery(&new_delivery);
+    assert_eq!(
+        s.escrow_events(),
+        std::vec![s.event(&Extended {
+            kind: ExtendedKind::Delivery,
+            new_deadline: new_delivery,
+        })]
+    );
+
+    s.deliver();
+    let new_receipt = s.get().receipt_deadline + DAY;
+    s.escrow.extend_receipt(&new_receipt);
+    assert_eq!(
+        s.escrow_events(),
+        std::vec![s.event(&Extended {
+            kind: ExtendedKind::Receipt,
+            new_deadline: new_receipt,
+        })]
     );
 }
 

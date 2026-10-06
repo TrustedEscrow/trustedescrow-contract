@@ -111,6 +111,22 @@ pub struct FeeSwept {
     pub fee: i128,
 }
 
+/// Which deadline `Extended` pushed back.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtendedKind {
+    Delivery,
+    Receipt,
+}
+
+#[contractevent(topics = ["extended"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Extended {
+    #[topic]
+    pub kind: ExtendedKind,
+    pub new_deadline: u64,
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -399,6 +415,54 @@ impl EscrowContract {
         }
         e.seller.require_auth();
         refund(&env, e, RefundPath::SellerRefund);
+    }
+
+    /// Give the seller more time to deliver. Only the buyer can call this,
+    /// and it can only push `delivery_deadline` later, never earlier — it
+    /// only ever benefits the seller. Callable even after the old deadline
+    /// has passed, as long as nobody has claimed the delivery timeout yet:
+    /// a buyer who chooses to keep waiting has accepted the delay, the same
+    /// way `submit_proof_with_code` already treats a late code handover as
+    /// acceptance of late delivery.
+    pub fn extend_delivery(env: Env, new_deadline: u64) {
+        let mut e = load(&env);
+        require_state(&env, &e, State::Funded);
+        e.buyer.require_auth();
+        if new_deadline <= e.delivery_deadline || new_deadline > add(&env, e.funded_at, MAX_WINDOW)
+        {
+            panic_with_error!(&env, Error::InvalidWindow);
+        }
+        e.delivery_deadline = new_deadline;
+        save(&env, &e);
+        Extended {
+            kind: ExtendedKind::Delivery,
+            new_deadline,
+        }
+        .publish(&env);
+    }
+
+    /// Give the buyer more time to give receipt or dispute. Only the seller
+    /// can call this, and it can only push `receipt_deadline` later, never
+    /// earlier — it only ever benefits the buyer.
+    pub fn extend_receipt(env: Env, new_deadline: u64) {
+        let mut e = load(&env);
+        require_state(&env, &e, State::Delivered);
+        e.seller.require_auth();
+        let submitted_at = e
+            .proof()
+            .expect("State::Delivered implies proof is submitted")
+            .submitted_at;
+        if new_deadline <= e.receipt_deadline || new_deadline > add(&env, submitted_at, MAX_WINDOW)
+        {
+            panic_with_error!(&env, Error::InvalidWindow);
+        }
+        e.receipt_deadline = new_deadline;
+        save(&env, &e);
+        Extended {
+            kind: ExtendedKind::Receipt,
+            new_deadline,
+        }
+        .publish(&env);
     }
 
     pub fn get(env: Env) -> Escrow {

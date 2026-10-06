@@ -42,6 +42,8 @@ Cancelled        Refunded ◀── delivery      Disputed ──resolve──�
                  timeout / seller_refund      └── arbitration deadline ──▶ Refunded
 ```
 
+Either deadline can be pushed later without changing state: the buyer calls `extend_delivery` while `Funded`, the seller calls `extend_receipt` while `Delivered`. Each only ever benefits the other side — a seller who's running late gets more time to deliver because the buyer chose to wait, and a buyer who needs more time to check the goods gets it because the seller chose to wait — and neither can push a deadline earlier or past the one-year window cap.
+
 ## Delivery codes
 
 A delivery code is 80 bits of entropy written as 16 Crockford base32 characters and shown as `K7M2-9XQF-4TBN-R3WD`. The escrow stores `sha256` of the 16 canonical characters. Because that hash is public, the code's length is its only defence against brute force: never generate shorter codes.
@@ -62,16 +64,17 @@ The escrow is only ever as good as the settlement token's own behaviour, which t
 With the [Stellar CLI](https://developers.stellar.org/docs/tools/cli) and a funded identity:
 
 ```sh
-SOURCE=admin ARBITRATOR=G... FEE_RECIPIENT=G... TOKEN=C... scripts/deploy-testnet.sh
+SOURCE=admin ARBITRATOR=G... FEE_RECIPIENT=G... TOKEN=C... \
+  MIN_AMOUNT=1 MAX_AMOUNT=10000000000 scripts/deploy-testnet.sh
 ```
 
-The script uploads the escrow WASM, deploys the factory, allowlists the settlement token and writes the factory id and escrow WASM hash to `deployments/testnet.env`.
+The script uploads the escrow WASM, deploys the factory, allowlists the settlement token between `MIN_AMOUNT` and `MAX_AMOUNT` (the token's smallest unit) and writes the factory id and escrow WASM hash to `deployments/testnet.env`. These bounds are required, not defaulted: while the contracts are unaudited, how much value one escrow can hold is a deliberate choice, not a quiet default.
 
 Clients must pin the escrow WASM hash they have audited and refuse to fund an escrow instance running anything else. A factory config change only affects escrows created after it, so a swapped WASM hash can never reach an open trade.
 
 Pinning the WASM hash is not enough on its own: anyone can deploy that same audited WASM directly, outside the factory, with their own arbitrator and fee recipient. Clients must also check **factory provenance** before funding: each escrow stores the `salt` the buyer passed to `Factory::create`, and `factory.escrow_address(escrow.buyer, escrow.salt)` must equal the escrow's own address. Only the factory's deployer address can produce that match, so a directly-deployed escrow fails this check no matter what salt it claims.
 
-Handing the factory to a new admin takes two steps: the current admin calls `propose_admin`, and nothing changes until the proposed address calls `accept_admin`. `set_config` cannot change the admin, so a mistyped address can never lock the factory.
+Handing the factory to a new admin takes two steps: the current admin calls `propose_admin`, and nothing changes until the proposed address calls `accept_admin`. `set_config` cannot change the admin, so a mistyped address can never lock the factory. A pending proposal can be withdrawn with `cancel_admin_transfer`, which emits `AdminTransferCancelled` so a withdrawn proposal is visible to anyone watching events, the same as a completed one.
 
 
 ## Live on testnet

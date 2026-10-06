@@ -10,9 +10,15 @@
 #
 # Usage:
 #   SOURCE=admin ARBITRATOR=G... FEE_RECIPIENT=G... TOKEN=C... \
-#     scripts/deploy-testnet.sh
+#     MIN_AMOUNT=1 MAX_AMOUNT=10000000000 scripts/deploy-testnet.sh
 #
 # FEE_BPS defaults to 150 (1.5%). The contract caps it at 1000.
+#
+# MIN_AMOUNT and MAX_AMOUNT are required, not defaulted: the contracts are
+# unaudited, so how much value one escrow can hold is a deliberate choice for
+# whoever is deploying, not something this script should pick quietly. Both
+# are in the token's smallest unit (e.g. for a 7-decimal asset, 10000000000
+# is 1,000 units).
 
 set -euo pipefail
 
@@ -20,6 +26,8 @@ set -euo pipefail
 : "${ARBITRATOR:?set ARBITRATOR to the arbitrator address}"
 : "${FEE_RECIPIENT:?set FEE_RECIPIENT to the fee recipient address}"
 : "${TOKEN:?set TOKEN to the settlement token contract id (e.g. testnet USDC SAC)}"
+: "${MIN_AMOUNT:?set MIN_AMOUNT, the smallest order amount this token will accept}"
+: "${MAX_AMOUNT:?set MAX_AMOUNT, the largest order amount this token will accept}"
 FEE_BPS="${FEE_BPS:-150}"
 NETWORK="${NETWORK:-testnet}"
 
@@ -44,9 +52,16 @@ FACTORY_ID=$(stellar contract deploy \
   --config "{\"admin\":\"$ADMIN\",\"escrow_wasm_hash\":\"$ESCROW_WASM_HASH\",\"arbitrator\":\"$ARBITRATOR\",\"fee_recipient\":\"$FEE_RECIPIENT\",\"fee_bps\":$FEE_BPS}")
 
 echo "Allowlisting settlement token..."
+# `limits` is Option<TokenLimits>; a JSON object means Some, as with
+# `--config` above. Not verified against a live network in the PR that added
+# it (#5) — no local Stellar node was available to confirm the CLI's exact
+# flag generation for an optional struct argument, so if this errors, check
+# `stellar contract invoke --id "$FACTORY_ID" --network "$NETWORK" --source
+# "$SOURCE" -- allow_token --help` and adjust.
 stellar contract invoke --id "$FACTORY_ID" \
   --source "$SOURCE" --network "$NETWORK" \
-  -- allow_token --token "$TOKEN" --allowed true
+  -- allow_token --token "$TOKEN" \
+  --limits "{\"min_amount\":\"$MIN_AMOUNT\",\"max_amount\":\"$MAX_AMOUNT\"}"
 
 mkdir -p deployments
 cat > "deployments/$NETWORK.env" <<EOF
@@ -58,6 +73,8 @@ ARBITRATOR=$ARBITRATOR
 FEE_RECIPIENT=$FEE_RECIPIENT
 FEE_BPS=$FEE_BPS
 TOKEN=$TOKEN
+MIN_AMOUNT=$MIN_AMOUNT
+MAX_AMOUNT=$MAX_AMOUNT
 EOF
 
 echo
