@@ -62,10 +62,11 @@ The escrow is only ever as good as the settlement token's own behaviour, which t
 With the [Stellar CLI](https://developers.stellar.org/docs/tools/cli) and a funded identity:
 
 ```sh
-SOURCE=admin ARBITRATOR=G... FEE_RECIPIENT=G... TOKEN=C... scripts/deploy-testnet.sh
+SOURCE=admin ARBITRATOR=G... FEE_RECIPIENT=G... TOKEN=C... \
+  MIN_AMOUNT=1 MAX_AMOUNT=10000000000 scripts/deploy-testnet.sh
 ```
 
-The script uploads the escrow WASM, deploys the factory, allowlists the settlement token and writes the factory id and escrow WASM hash to `deployments/testnet.env`.
+The script uploads the escrow WASM, deploys the factory, allowlists the settlement token between `MIN_AMOUNT` and `MAX_AMOUNT` (the token's smallest unit) and writes the factory id and escrow WASM hash to `deployments/testnet.env`. These bounds are required, not defaulted: while the contracts are unaudited, how much value one escrow can hold is a deliberate choice, not a quiet default.
 
 Clients must pin the escrow WASM hash they have audited and refuse to fund an escrow instance running anything else. A factory config change only affects escrows created after it, so a swapped WASM hash can never reach an open trade.
 

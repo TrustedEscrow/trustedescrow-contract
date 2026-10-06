@@ -26,6 +26,14 @@ pub struct Config {
     pub fee_bps: u32,
 }
 
+/// Bounds on `Order::amount` for one allowlisted token. Both ends inclusive.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenLimits {
+    pub min_amount: i128,
+    pub max_amount: i128,
+}
+
 #[contracttype]
 enum DataKey {
     Config,
@@ -41,6 +49,9 @@ pub enum Error {
     InvalidFee = 2,
     AdminChangeRequiresTransfer = 3,
     NoPendingAdmin = 4,
+    InvalidTokenLimits = 5,
+    AmountTooSmall = 6,
+    AmountTooLarge = 7,
 }
 
 #[contractevent(topics = ["escrow"])]
@@ -61,12 +72,18 @@ pub struct ConfigUpdated {
     pub config: Config,
 }
 
+// `limits` isn't `Option<TokenLimits>`: soroban-sdk 27's `#[contractevent]`
+// hits the same XDR-derive limitation as `#[contracttype]` does for
+// `Option<T>` over a contract type (see crates/types). `min_amount` and
+// `max_amount` are 0 when `allowed` is false.
 #[contractevent(topics = ["token"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenAllowed {
     #[topic]
     pub token: Address,
     pub allowed: bool,
+    pub min_amount: i128,
+    pub max_amount: i128,
 }
 
 #[contractevent(topics = ["adm_prop"])]
@@ -110,8 +127,13 @@ impl Factory {
     /// before submission and no one else can claim it.
     pub fn create(env: Env, order: Order, salt: BytesN<32>) -> Address {
         order.buyer.require_auth();
-        if !Self::is_token_allowed(env.clone(), order.token.clone()) {
-            panic_with_error!(&env, Error::TokenNotAllowed);
+        let limits = Self::token_limits(env.clone(), order.token.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, Error::TokenNotAllowed));
+        if order.amount < limits.min_amount {
+            panic_with_error!(&env, Error::AmountTooSmall);
+        }
+        if order.amount > limits.max_amount {
+            panic_with_error!(&env, Error::AmountTooLarge);
         }
         let config = Self::config(env.clone());
         let params = EscrowParams {
@@ -210,16 +232,32 @@ impl Factory {
         env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
-    pub fn allow_token(env: Env, token: Address, allowed: bool) {
+    /// Allow `token` for orders between `limits.min_amount` and
+    /// `limits.max_amount` (inclusive), or disallow it with `None`.
+    pub fn allow_token(env: Env, token: Address, limits: Option<TokenLimits>) {
         Self::config(env.clone()).admin.require_auth();
         let key = DataKey::Token(token.clone());
-        if allowed {
-            env.storage().persistent().set(&key, &true);
-            extend_persistent_ttl(&env, &key);
-        } else {
-            env.storage().persistent().remove(&key);
+        let (allowed, min_amount, max_amount) = match limits {
+            Some(limits) => {
+                if limits.min_amount <= 0 || limits.min_amount > limits.max_amount {
+                    panic_with_error!(&env, Error::InvalidTokenLimits);
+                }
+                env.storage().persistent().set(&key, &limits);
+                extend_persistent_ttl(&env, &key);
+                (true, limits.min_amount, limits.max_amount)
+            }
+            None => {
+                env.storage().persistent().remove(&key);
+                (false, 0, 0)
+            }
+        };
+        TokenAllowed {
+            token,
+            allowed,
+            min_amount,
+            max_amount,
         }
-        TokenAllowed { token, allowed }.publish(&env);
+        .publish(&env);
     }
 
     pub fn config(env: Env) -> Config {
@@ -227,12 +265,16 @@ impl Factory {
     }
 
     pub fn is_token_allowed(env: Env, token: Address) -> bool {
+        Self::token_limits(env, token).is_some()
+    }
+
+    pub fn token_limits(env: Env, token: Address) -> Option<TokenLimits> {
         let key = DataKey::Token(token);
-        let allowed = env.storage().persistent().has(&key);
-        if allowed {
+        let limits: Option<TokenLimits> = env.storage().persistent().get(&key);
+        if limits.is_some() {
             extend_persistent_ttl(&env, &key);
         }
-        allowed
+        limits
     }
 }
 
