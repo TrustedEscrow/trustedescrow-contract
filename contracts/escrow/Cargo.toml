@@ -18,6 +18,12 @@ trustescrow-types = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 trustescrow-types = { workspace = true, features = ["testutils"] }
 trustescrow-code = { workspace = true }
+# For signing real authorization entries in the multisig arbitrator test —
+# mock_auths/mock_all_auths swap in a stub __check_auth that never actually
+# checks a signature, so testing a custom account's real verification needs
+# genuine ed25519 signatures over the exact payload the host will check.
+ed25519-dalek = "2"
+rand = "0.8"
 
 [features]
 testutils = ["soroban-sdk/testutils", "trustescrow-types/testutils"]

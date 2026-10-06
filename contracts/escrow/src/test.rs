@@ -1491,3 +1491,244 @@ fn clawback_from_a_funded_escrow_leaves_it_permanently_stuck() {
     assert!(s.escrow.try_release_with_code(&s.code()).is_err());
     assert_eq!(s.state(), State::Delivered);
 }
+
+// --- Multisig arbitrator -------------------------------------------------------
+//
+// mock_all_auths/mock_auths swap in a stub __check_auth that approves
+// unconditionally — they prove nothing about whether a custom account's real
+// signature verification runs correctly. These tests sign a real
+// authorization entry with real ed25519 keys and submit it with
+// env.set_auths, so __check_auth genuinely executes.
+
+mod multisig {
+    use soroban_sdk::{
+        auth::{Context, CustomAccountInterface},
+        contract, contracterror, contractimpl, contracttype,
+        crypto::Hash,
+        BytesN, Env, Vec,
+    };
+
+    #[contracttype]
+    pub enum DataKey {
+        Signers,
+        Threshold,
+    }
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        NotEnoughSignatures = 1,
+        SignaturesOutOfOrder = 2,
+    }
+
+    /// Minimal N-of-M multisig custom account: `threshold` of the `signers`
+    /// ed25519 keys (by index into `signers`, strictly increasing so the
+    /// same key can't be counted twice) must each produce a valid signature
+    /// over the exact payload the host asks `__check_auth` to verify.
+    #[contract]
+    pub struct MultisigAccount;
+
+    #[contractimpl]
+    impl MultisigAccount {
+        pub fn __constructor(env: Env, signers: Vec<BytesN<32>>, threshold: u32) {
+            env.storage().instance().set(&DataKey::Signers, &signers);
+            env.storage()
+                .instance()
+                .set(&DataKey::Threshold, &threshold);
+        }
+    }
+
+    #[contractimpl]
+    impl CustomAccountInterface for MultisigAccount {
+        type Signature = Vec<(u32, BytesN<64>)>;
+        type Error = Error;
+
+        fn __check_auth(
+            env: Env,
+            signature_payload: Hash<32>,
+            signatures: Vec<(u32, BytesN<64>)>,
+            _auth_contexts: Vec<Context>,
+        ) -> Result<(), Error> {
+            let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+            if signatures.len() < threshold {
+                return Err(Error::NotEnoughSignatures);
+            }
+            let signers: Vec<BytesN<32>> = env.storage().instance().get(&DataKey::Signers).unwrap();
+            let message: soroban_sdk::Bytes = signature_payload.into();
+
+            let mut last_index: i64 = -1;
+            for (index, sig) in signatures.iter() {
+                if i64::from(index) <= last_index {
+                    return Err(Error::SignaturesOutOfOrder);
+                }
+                last_index = i64::from(index);
+                let public_key = signers.get(index).unwrap();
+                // Panics (traps the whole call) on a bad signature, same as
+                // every other signature check in this contract — these
+                // tests only ever present genuinely valid signatures, since
+                // the property under test is the *threshold*, not forgery
+                // detection.
+                env.crypto().ed25519_verify(&public_key, &message, &sig);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Builds and signs a `SorobanAuthorizationEntry` for `account` (a deployed
+/// `multisig::MultisigAccount`) authorizing a single top-level call —
+/// `contract.fn_name(args)` — with no sub-invocations. `signing_keys` pairs
+/// each signer's index (into the account's `signers`, as constructed) with
+/// its real ed25519 key; this reproduces exactly what a wallet does when
+/// signing offline, not a shortcut.
+fn sign_multisig_auth(
+    env: &Env,
+    account: &Address,
+    contract: &Address,
+    fn_name: &str,
+    args: soroban_sdk::Vec<soroban_sdk::Val>,
+    signing_keys: &[(u32, &ed25519_dalek::SigningKey)],
+    nonce: i64,
+) -> soroban_sdk::xdr::SorobanAuthorizationEntry {
+    use ed25519_dalek::Signer as _;
+    use soroban_sdk::xdr::{
+        self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited,
+        Limits, ScAddress, SorobanAddressCredentials, SorobanAuthorizationEntry,
+        SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, WriteXdr,
+    };
+    use soroban_sdk::TryFromVal;
+
+    let network_id = xdr::Hash([0u8; 32]); // the test env's default.
+    let signature_expiration_ledger = env.ledger().sequence() + 100;
+    let address: ScAddress = account.into();
+    let invocation = SorobanAuthorizedInvocation {
+        function: SorobanAuthorizedFunction::ContractFn(InvokeContractArgs {
+            contract_address: contract.into(),
+            function_name: fn_name.try_into().unwrap(),
+            args: args.into(),
+        }),
+        sub_invocations: Default::default(),
+    };
+    // `SorobanCredentials::Address` (the plain, non-delegated variant used
+    // below) hashes the preimage *without* the address folded in — that's
+    // only for `AddressV2`/`AddressWithDelegates`, confirmed by reading
+    // soroban-env-host's `uses_preimage_with_address` directly rather than
+    // assuming the newer-looking `...WithAddress` preimage applied here.
+    let preimage = HashIdPreimage::SorobanAuthorization(HashIdPreimageSorobanAuthorization {
+        network_id,
+        nonce,
+        signature_expiration_ledger,
+        invocation: invocation.clone(),
+    });
+    let mut buf = std::vec::Vec::new();
+    preimage
+        .write_xdr(&mut Limited::new(&mut buf, Limits::none()))
+        .unwrap();
+    let payload: [u8; 32] = env
+        .crypto()
+        .sha256(&Bytes::from_slice(env, &buf))
+        .to_array();
+
+    let sigs: soroban_sdk::Vec<(u32, BytesN<64>)> = soroban_sdk::vec![env];
+    let mut sigs = sigs;
+    for (index, key) in signing_keys {
+        let sig = key.sign(&payload);
+        sigs.push_back((*index, BytesN::from_array(env, &sig.to_bytes())));
+    }
+    let signature = xdr::ScVal::try_from_val(env, &sigs.to_val()).unwrap();
+
+    SorobanAuthorizationEntry {
+        root_invocation: invocation,
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address,
+            nonce,
+            signature_expiration_ledger,
+            signature,
+        }),
+    }
+}
+
+#[test]
+fn arbitrator_as_a_multisig_needs_the_threshold_of_signatures() {
+    let env = new_env();
+    let keys: std::vec::Vec<ed25519_dalek::SigningKey> = (0..3)
+        .map(|_| ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))
+        .collect();
+    let signer_bytes: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::vec![
+        &env,
+        BytesN::from_array(&env, &keys[0].verifying_key().to_bytes()),
+        BytesN::from_array(&env, &keys[1].verifying_key().to_bytes()),
+        BytesN::from_array(&env, &keys[2].verifying_key().to_bytes()),
+    ];
+    let arbitrator = env.register(multisig::MultisigAccount, (signer_bytes, 2u32));
+
+    let mut params = default_params(&env);
+    params.arbitrator = arbitrator.clone();
+    let s = setup_from(env, params).delivered();
+    s.escrow.dispute(&s.buyer, &s.statement_hash());
+
+    let outcome = Outcome::Release;
+    let ruling_hash = s.ruling_hash();
+    let args = soroban_sdk::vec![
+        &s.env,
+        outcome.into_val(&s.env),
+        ruling_hash.into_val(&s.env),
+    ];
+
+    // One signature isn't enough.
+    let one_sig = sign_multisig_auth(
+        &s.env,
+        &arbitrator,
+        &s.escrow.address,
+        "resolve",
+        args.clone(),
+        &[(0, &keys[0])],
+        0,
+    );
+    s.env.set_auths(&[one_sig]);
+    assert!(s.escrow.try_resolve(&outcome, &ruling_hash).is_err());
+    assert_eq!(s.state(), State::Disputed);
+
+    // Two genuinely signs it — the real __check_auth ran and accepted it,
+    // not a mock standing in for it. A fresh nonce: the rejected attempt
+    // above shouldn't matter, but a *successful* call consumes its nonce,
+    // so reusing one across two calls that are both meant to succeed would
+    // break the second one.
+    let two_sigs = sign_multisig_auth(
+        &s.env,
+        &arbitrator,
+        &s.escrow.address,
+        "resolve",
+        args,
+        &[(0, &keys[0]), (2, &keys[2])],
+        1,
+    );
+    s.env.set_auths(&[two_sigs]);
+    s.escrow.resolve(&outcome, &ruling_hash);
+    s.assert_seller_paid();
+}
+
+#[test]
+fn a_multisig_contract_can_be_the_fee_recipient_and_the_seller() {
+    // Receiving never requires authorisation, so this needs no signing —
+    // it just confirms a contract address (not only a classic account) can
+    // hold the settlement token as fee_recipient and as the seller.
+    let env = new_env();
+    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let signers = soroban_sdk::vec![
+        &env,
+        BytesN::from_array(&env, &key.verifying_key().to_bytes()),
+    ];
+    let multisig_fee_recipient = env.register(multisig::MultisigAccount, (signers.clone(), 1u32));
+    let multisig_seller = env.register(multisig::MultisigAccount, (signers, 1u32));
+
+    let mut params = default_params(&env);
+    params.fee_recipient = multisig_fee_recipient.clone();
+    params.order.seller = multisig_seller.clone();
+    let s = setup_from(env, params).delivered();
+    s.escrow.release_with_code(&s.code());
+
+    assert_eq!(s.balance(&multisig_seller), AMOUNT - FEE);
+    assert_eq!(s.balance(&multisig_fee_recipient), FEE);
+}
