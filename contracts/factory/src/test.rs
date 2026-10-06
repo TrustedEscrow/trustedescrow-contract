@@ -165,6 +165,58 @@ fn create_deploys_escrow_at_predicted_address_with_factory_config() {
 }
 
 #[test]
+fn create_and_fund_deploys_and_funds_in_one_call() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let order = s.order(&buyer);
+    StellarAssetClient::new(&s.env, &s.token).mint(&buyer, &AMOUNT);
+    let predicted = s.factory.escrow_address(&buyer, &s.salt(1));
+
+    let address = s.factory.create_and_fund(&order, &s.salt(1));
+    assert_eq!(address, predicted);
+
+    let escrow = s.escrow(&address);
+    assert_eq!(escrow.get().state, escrow_wasm::State::Funded);
+    assert_eq!(TokenClient::new(&s.env, &s.token).balance(&address), AMOUNT);
+    assert_eq!(TokenClient::new(&s.env, &s.token).balance(&buyer), 0);
+}
+
+/// `create_and_fund` must ask the buyer for exactly one signature, whose
+/// authorised tree covers `create_and_fund` -> the escrow's `fund` ->
+/// the token `transfer` — not three separate signatures, and not a
+/// signature the wallet can't see the full shape of.
+#[test]
+fn create_and_fund_asks_for_exactly_one_signature_covering_the_whole_chain() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let order = s.order(&buyer);
+    StellarAssetClient::new(&s.env, &s.token).mint(&buyer, &AMOUNT);
+
+    s.factory.create_and_fund(&order, &s.salt(1));
+
+    let auths = s.env.auths();
+    assert_eq!(auths.len(), 1, "expected one signer, got {auths:?}");
+    assert_eq!(auths[0].0, buyer);
+
+    let root = &auths[0].1;
+    assert_eq!(
+        root.sub_invocations.len(),
+        1,
+        "expected one sub-call (fund)"
+    );
+    let fund_call = &root.sub_invocations[0];
+    assert_eq!(
+        fund_call.sub_invocations.len(),
+        1,
+        "expected one sub-call under fund (the token transfer)"
+    );
+    assert!(
+        fund_call.sub_invocations[0].sub_invocations.is_empty(),
+        "the token transfer shouldn't need any further authorisation"
+    );
+}
+
+#[test]
 fn directly_deployed_escrow_fails_the_factory_provenance_check() {
     let s = setup();
     let buyer = Address::generate(&s.env);
@@ -419,6 +471,30 @@ fn create_emits_escrow_created_and_the_escrow_emits_its_own() {
     // The new escrow's constructor publishes its own `created` event in the
     // same invocation.
     assert_eq!(s.events_of(&escrow).len(), 1);
+}
+
+#[test]
+fn create_and_fund_emits_escrow_created_and_the_escrow_emits_created_then_funded() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let order = s.order(&buyer);
+    StellarAssetClient::new(&s.env, &s.token).mint(&buyer, &AMOUNT);
+    let escrow = s.factory.create_and_fund(&order, &s.salt(1));
+
+    let expected = EscrowCreated {
+        buyer,
+        seller: order.seller,
+        escrow: escrow.clone(),
+        token: s.token.clone(),
+        amount: AMOUNT,
+    };
+    assert_eq!(
+        s.events_of(&s.factory.address),
+        std::vec![s.event(&expected)]
+    );
+    // The escrow's constructor and its fund() both publish, in order, in
+    // the same top-level invocation.
+    assert_eq!(s.events_of(&escrow).len(), 2);
 }
 
 #[test]

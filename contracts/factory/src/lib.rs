@@ -6,11 +6,20 @@
 //! own arbitrator and fee at creation and has no setter.
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
-    xdr::ToXdr, Address, Bytes, BytesN, Env,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env,
 };
 
 pub use trustescrow_types::{EscrowParams, Order, MAX_FEE_BPS};
+
+/// Just enough of the escrow's interface to call `fund` on one the factory
+/// just deployed. A minimal trait rather than depending on the escrow crate,
+/// so the factory's WASM never links the escrow's implementation.
+#[contractclient(name = "EscrowClient")]
+#[allow(dead_code)]
+trait EscrowFund {
+    fn fund(env: Env);
+}
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const TTL_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
@@ -150,14 +159,12 @@ impl Factory {
             .deploy_v2(config.escrow_wasm_hash, (params,));
         extend_instance_ttl(&env);
 
-        EscrowCreated {
-            buyer: order.buyer,
-            seller: order.seller,
-            escrow: escrow.clone(),
-            token: order.token,
-            amount: order.amount,
-        }
-        .publish(&env);
+    /// `create`, then `fund()` on the new escrow in the same transaction —
+    /// one signature covering create -> fund -> token transfer, instead of
+    /// leaving an unfunded escrow if the buyer never comes back to fund it.
+    pub fn create_and_fund(env: Env, order: Order, salt: BytesN<32>) -> Address {
+        let escrow = do_create(&env, order, salt);
+        EscrowClient::new(&env, &escrow).fund();
         escrow
     }
 
@@ -276,6 +283,37 @@ impl Factory {
         }
         limits
     }
+}
+
+fn do_create(env: &Env, order: Order, salt: BytesN<32>) -> Address {
+    order.buyer.require_auth();
+    if !Factory::is_token_allowed(env.clone(), order.token.clone()) {
+        panic_with_error!(env, Error::TokenNotAllowed);
+    }
+    let config = Factory::config(env.clone());
+    let params = EscrowParams {
+        order: order.clone(),
+        arbitrator: config.arbitrator,
+        fee_bps: config.fee_bps,
+        fee_recipient: config.fee_recipient,
+        salt: salt.clone(),
+    };
+
+    let escrow = env
+        .deployer()
+        .with_current_contract(escrow_salt(env, &order.buyer, &salt))
+        .deploy_v2(config.escrow_wasm_hash, (params,));
+    extend_instance_ttl(env);
+
+    EscrowCreated {
+        buyer: order.buyer,
+        seller: order.seller,
+        escrow: escrow.clone(),
+        token: order.token,
+        amount: order.amount,
+    }
+    .publish(env);
+    escrow
 }
 
 fn write_config(env: &Env, config: &Config) {
