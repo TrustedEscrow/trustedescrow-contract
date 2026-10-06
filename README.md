@@ -1,5 +1,7 @@
 # TrustEscrow contracts
 
+[![Coverage](https://github.com/TrustedEscrow/trustedescrow-contract/actions/workflows/coverage.yml/badge.svg)](https://github.com/TrustedEscrow/trustedescrow-contract/actions/workflows/coverage.yml)
+
 Soroban contracts for TrustEscrow, a peer-to-peer escrow for online trade between strangers.
 
 A buyer deposits, the seller proves delivery on-chain, the buyer proves receipt (by handing over a delivery code or signing a confirmation), and only then is the seller paid. No timeout ever pays the seller: a silent buyer escalates to an arbitrator, and an arbitrator who doesn't rule in time refunds the buyer.
@@ -30,6 +32,17 @@ A release's WASM is exactly `make build`'s output on the tagged commit, with the
 `cargo test` on its own fails to compile the factory tests if the escrow WASM hasn't been built yet. Dependencies are compiled with optimisation even in test builds, because the Soroban host is very slow without it; the first build takes a while, later ones are quick.
 
 Besides unit tests for every transition and deadline boundary, the escrow has a seeded randomised state-machine test that drives escrows through random call sequences and checks conservation, terminality and the two-sided release rule after every step. CI runs formatting, the WASM build, clippy and all tests on every push.
+
+### Code coverage
+
+[`.github/workflows/coverage.yml`](.github/workflows/coverage.yml) measures line coverage for `trustescrow-escrow`, `trustescrow-factory` and `trustescrow-code` with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) on every push and pull request, and uploads the report as a workflow artifact. Reproduce locally with:
+
+```sh
+make build   # the factory tests need the real escrow WASM, same as always
+cargo llvm-cov -p trustescrow-escrow -p trustescrow-factory -p trustescrow-code --summary-only
+```
+
+The workflow doesn't fail the build below a minimum yet. That gate needs a real baseline run first — the actual current number, rounded down, not a guessed target — which this change doesn't include; see the `TODO(#15)` in the workflow file.
 
 ## Lifecycle at a glance
 

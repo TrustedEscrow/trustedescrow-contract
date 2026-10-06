@@ -1,0 +1,53 @@
+name: Coverage
+
+# Line coverage for the contract and code crates, via cargo-llvm-cov.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel, target and components.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The factory tests deploy the real escrow WASM, so build it first —
+      # same ordering constraint as the main CI job and the Makefile.
+      - name: Build WASM
+        run: make build
+
+      - name: Measure coverage
+        run: |
+          cargo llvm-cov \
+            -p trustescrow-escrow -p trustescrow-factory -p trustescrow-code \
+            --lcov --output-path lcov.info
+
+      # TODO(#15): this only measures and reports coverage; it doesn't yet
+      # fail the job below a minimum. Enforcing a floor needs a real
+      # baseline run first — "start at the current number, rounded down,"
+      # not a guess — which wasn't done as part of adding this workflow
+      # (left for whoever runs this for real; see the note in the PR and
+      # in README's "Code coverage" section). Once that number exists, add
+      # e.g. `--fail-under-lines <N>` to the step above, per package or
+      # overall, and remove this TODO.
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: lcov.info
+          if-no-files-found: ignore
