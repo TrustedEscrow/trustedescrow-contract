@@ -86,6 +86,13 @@ pub struct Dispute {
     pub from_state: State,
     /// The arbitrator must rule before this; afterwards the buyer is refunded.
     pub deadline: u64,
+    /// sha256 of the opener's off-chain statement, committed when the
+    /// dispute opened. Zero for `ReceiptTimeout`, which has no statement.
+    pub statement_hash: BytesN<32>,
+    /// sha256 of the arbitrator's written ruling. Zero until `resolve` sets
+    /// it; stays zero if the arbitrator never rules and the dispute instead
+    /// ends via the arbitration timeout.
+    pub ruling_hash: BytesN<32>,
 }
 
 /// What the buyer asks the factory to create.

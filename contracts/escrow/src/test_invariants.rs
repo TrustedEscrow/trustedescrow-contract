@@ -225,7 +225,10 @@ impl World<'_> {
                 succeeded(self.escrow.try_release_with_code(&self.some_code(rng)))
             }
             Op::Confirm => succeeded(self.escrow.try_confirm()),
-            Op::Dispute => succeeded(self.escrow.try_dispute(&self.anyone(rng))),
+            Op::Dispute => {
+                let hash = BytesN::from_array(&self.env, &[9; 32]);
+                succeeded(self.escrow.try_dispute(&self.anyone(rng), &hash))
+            }
             Op::Escalate => succeeded(self.escrow.try_escalate()),
             Op::Resolve => {
                 let outcome = if rng.below(2) == 0 {
@@ -233,7 +236,8 @@ impl World<'_> {
                 } else {
                     Outcome::Refund
                 };
-                succeeded(self.escrow.try_resolve(&outcome))
+                let hash = BytesN::from_array(&self.env, &[8; 32]);
+                succeeded(self.escrow.try_resolve(&outcome, &hash))
             }
             Op::RefundAfterDeliveryTimeout => {
                 succeeded(self.escrow.try_refund_after_delivery_timeout())
