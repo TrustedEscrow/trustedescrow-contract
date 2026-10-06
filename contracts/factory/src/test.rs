@@ -642,3 +642,12 @@ fn admin_transfer_emits_proposed_then_transferred() {
         std::vec![s.event(&transferred)]
     );
 }
+
+#[test]
+fn version_matches_the_crate_version() {
+    let s = setup();
+    assert_eq!(
+        s.factory.version(),
+        String::from_str(&s.env, env!("CARGO_PKG_VERSION"))
+    );
+}

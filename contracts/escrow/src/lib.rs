@@ -6,14 +6,26 @@
 //! No timeout pays the seller.
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, Bytes, BytesN, Env, String,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
+    panic_with_error, token, Address, Bytes, BytesN, Env, String,
 };
 
 pub use trustescrow_types::{
     Dispute, DisputeOrigin, DisputeRecord, Escrow, EscrowParams, Order, Outcome, Proof, ProofKind,
     ProofRecord, RefundPath, ReleasePath, Settlement, State, MAX_FEE_BPS,
 };
+
+// `source_repo` is also what SEP-55 build verification looks for, matching
+// against the repository a tagged release's WASM was built from.
+contractmeta!(key = "binver", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(
+    key = "source_repo",
+    val = "https://github.com/TrustedEscrow/trustedescrow-contract"
+);
+contractmeta!(
+    key = "description",
+    val = "TrustEscrow escrow contract: one instance per trade, two-sided release"
+);
 
 pub const MAX_URI_LEN: u32 = 256;
 pub const MIN_WINDOW: u64 = 60 * 60;
@@ -515,6 +527,11 @@ impl EscrowContract {
     /// Extend the instance TTL. Public so a bumper job can keep idle escrows live.
     pub fn bump(env: Env) {
         extend_ttl(&env);
+    }
+
+    /// The `trustescrow-escrow` crate version this WASM was built from.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 }
 
