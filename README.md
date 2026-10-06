@@ -31,6 +31,20 @@ A release's WASM is exactly `make build`'s output on the tagged commit, with the
 
 Besides unit tests for every transition and deadline boundary, the escrow has a seeded randomised state-machine test that drives escrows through random call sequences and checks conservation, terminality and the two-sided release rule after every step. CI runs formatting, the WASM build, clippy and all tests on every push.
 
+### Fuzzing
+
+`fuzz/` holds coverage-guided fuzz targets (cargo-fuzz / libFuzzer), separate from `test_invariants.rs`'s seeded-but-fixed randomised test: libFuzzer mutates towards inputs that reach *new* code paths instead of sampling uniformly. `escrow_state_machine` drives one escrow through a fuzzer-chosen sequence of calls and checks the exact same safety properties as `test_invariants.rs`, by calling the same shared, `testutils`-gated `trustescrow_escrow::invariants::check` — so the seeded test and the fuzzer can never silently disagree about what "safe" means.
+
+Needs nightly (`fuzz/rust-toolchain.toml` pins it — libFuzzer's instrumentation isn't available on the stable toolchain the contracts themselves build with) and `cargo install cargo-fuzz`:
+
+```sh
+cd fuzz
+cargo fuzz run escrow_state_machine              # until Ctrl-C
+cargo fuzz run escrow_state_machine -- -max_total_time=600   # or a fixed budget
+```
+
+A crash writes the failing input to `fuzz/artifacts/escrow_state_machine/`; rerun `cargo fuzz run escrow_state_machine <path>` to reproduce it under a debugger. CI runs every target nightly for ten minutes each ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) and uploads any crash as a workflow artifact — not on every push, since each target's ASan build is slow and needs a real time budget to find anything, neither of which belongs blocking a PR.
+
 ## Lifecycle at a glance
 
 ```

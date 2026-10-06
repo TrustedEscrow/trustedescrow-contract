@@ -266,74 +266,10 @@ impl World<'_> {
         let buyer = self.token.balance(&self.buyer);
         let seller = self.token.balance(&self.seller);
         let fee = self.token.balance(&self.fee_recipient);
-
-        // Conservation: tokens only ever move between these four.
-        assert_eq!(held + buyer + seller + fee, AMOUNT, "{ctx}");
-
-        // Terminal states are final.
-        if matches!(
-            previous,
-            State::Released | State::Refunded | State::Cancelled
-        ) {
-            assert_eq!(e.state, previous, "{ctx}");
-        }
-
-        match e.state {
-            State::Created | State::Cancelled => {
-                assert_eq!((held, buyer), (0, AMOUNT), "{ctx}");
-                assert!(e.proof().is_none() && e.dispute().is_none(), "{ctx}");
-            }
-            State::Funded => {
-                assert_eq!(held, AMOUNT, "{ctx}");
-                assert!(e.proof().is_none() && e.dispute().is_none(), "{ctx}");
-            }
-            State::Delivered => {
-                assert_eq!(held, AMOUNT, "{ctx}");
-                assert!(e.proof().is_some() && e.dispute().is_none(), "{ctx}");
-            }
-            State::Disputed => {
-                assert_eq!(held, AMOUNT, "{ctx}");
-                assert!(e.dispute().is_some(), "{ctx}");
-            }
-            State::Released => {
-                // Two-sided release: buyer evidence on top of seller proof,
-                // or the arbitrator's ruling. Nothing else pays the seller.
-                match e.released_via().unwrap() {
-                    ReleasePath::Code | ReleasePath::Confirmation => {
-                        assert!(e.proof().is_some() && e.dispute().is_none(), "{ctx}")
-                    }
-                    ReleasePath::Arbitration => assert!(e.dispute().is_some(), "{ctx}"),
-                }
-                // A terminal escrow holds no tokens except an unswept fee:
-                // the seller is paid in full regardless of whether the fee
-                // transfer to `fee_recipient` succeeded.
-                let expected_fee = AMOUNT * FEE_BPS as i128 / 10_000;
-                assert_eq!(held, e.unswept_fee, "{ctx}");
-                assert_eq!(
-                    (buyer, seller, fee + e.unswept_fee),
-                    (0, AMOUNT - expected_fee, expected_fee),
-                    "{ctx}"
-                );
-            }
-            State::Refunded => {
-                match e.refunded_via().unwrap() {
-                    RefundPath::DeliveryTimeout => assert!(e.proof().is_none(), "{ctx}"),
-                    RefundPath::Arbitration | RefundPath::ArbitrationTimeout => {
-                        assert!(e.dispute().is_some(), "{ctx}")
-                    }
-                    RefundPath::SellerRefund => {}
-                }
-                // Refunds are whole and fee-free.
-                assert_eq!((held, buyer, seller, fee), (0, AMOUNT, 0, 0), "{ctx}");
-            }
-        }
-        if !matches!(e.state, State::Released | State::Refunded) {
-            assert_eq!(e.settlement, Settlement::Open, "{ctx}");
-        }
-        // Only a release can ever leave a fee unswept.
-        if e.state != State::Released {
-            assert_eq!(e.unswept_fee, 0, "{ctx}");
-        }
+        // Shared with the escrow_state_machine fuzz target in fuzz/, so the
+        // randomised test and the fuzzer can never silently drift apart on
+        // what "safe" means for an escrow.
+        crate::invariants::check(&e, held, buyer, seller, fee, previous, ctx);
         e
     }
 }

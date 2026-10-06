@@ -665,6 +665,103 @@ fn refund(env: &Env, mut e: Escrow, path: RefundPath, ruling_hash: BytesN<32>) {
     .publish(env);
 }
 
+/// Invariant checks shared by the randomised state-machine test
+/// (`test_invariants`) and the `escrow_state_machine` fuzz target in
+/// `fuzz/`, so the two can never silently drift apart on what "safe" means
+/// for an escrow. Not part of the deployed contract: gated on `test` or the
+/// `testutils` feature, same as the rest of this crate's test-only surface.
+#[cfg(any(test, feature = "testutils"))]
+pub mod invariants {
+    use super::*;
+
+    /// `held`, `buyer`, `seller` and `fee` are the settlement token's
+    /// balance of the escrow contract, the buyer, the seller and the fee
+    /// recipient respectively, read by the caller right after the call that
+    /// produced `e`; `previous` is the escrow's state before that call.
+    /// `ctx` is prepended to every assertion failure, so a caller driving
+    /// many sequences (randomised or fuzzed) can report which one and which
+    /// step broke. Panics on the first property that doesn't hold.
+    pub fn check(
+        e: &Escrow,
+        held: i128,
+        buyer: i128,
+        seller: i128,
+        fee: i128,
+        previous: State,
+        ctx: &str,
+    ) {
+        let amount = e.amount;
+
+        // Conservation: tokens only ever move between these four.
+        assert_eq!(held + buyer + seller + fee, amount, "{ctx}");
+
+        // Terminal states are final.
+        if matches!(
+            previous,
+            State::Released | State::Refunded | State::Cancelled
+        ) {
+            assert_eq!(e.state, previous, "{ctx}");
+        }
+
+        match e.state {
+            State::Created | State::Cancelled => {
+                assert_eq!((held, buyer), (0, amount), "{ctx}");
+                assert!(e.proof().is_none() && e.dispute().is_none(), "{ctx}");
+            }
+            State::Funded => {
+                assert_eq!(held, amount, "{ctx}");
+                assert!(e.proof().is_none() && e.dispute().is_none(), "{ctx}");
+            }
+            State::Delivered => {
+                assert_eq!(held, amount, "{ctx}");
+                assert!(e.proof().is_some() && e.dispute().is_none(), "{ctx}");
+            }
+            State::Disputed => {
+                assert_eq!(held, amount, "{ctx}");
+                assert!(e.dispute().is_some(), "{ctx}");
+            }
+            State::Released => {
+                // Two-sided release: buyer evidence on top of seller proof,
+                // or the arbitrator's ruling. Nothing else pays the seller.
+                match e.released_via().unwrap() {
+                    ReleasePath::Code | ReleasePath::Confirmation => {
+                        assert!(e.proof().is_some() && e.dispute().is_none(), "{ctx}")
+                    }
+                    ReleasePath::Arbitration => assert!(e.dispute().is_some(), "{ctx}"),
+                }
+                // A terminal escrow holds no tokens except an unswept fee:
+                // the seller is paid in full regardless of whether the fee
+                // transfer to `fee_recipient` succeeded.
+                let expected_fee = amount * e.fee_bps as i128 / BPS_DENOMINATOR;
+                assert_eq!(held, e.unswept_fee, "{ctx}");
+                assert_eq!(
+                    (buyer, seller, fee + e.unswept_fee),
+                    (0, amount - expected_fee, expected_fee),
+                    "{ctx}"
+                );
+            }
+            State::Refunded => {
+                match e.refunded_via().unwrap() {
+                    RefundPath::DeliveryTimeout => assert!(e.proof().is_none(), "{ctx}"),
+                    RefundPath::Arbitration | RefundPath::ArbitrationTimeout => {
+                        assert!(e.dispute().is_some(), "{ctx}")
+                    }
+                    RefundPath::SellerRefund => {}
+                }
+                // Refunds are whole and fee-free.
+                assert_eq!((held, buyer, seller, fee), (0, amount, 0, 0), "{ctx}");
+            }
+        }
+        if !matches!(e.state, State::Released | State::Refunded) {
+            assert_eq!(e.settlement, Settlement::Open, "{ctx}");
+        }
+        // Only a release can ever leave a fee unswept.
+        if e.state != State::Released {
+            assert_eq!(e.unswept_fee, 0, "{ctx}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod test;
 #[cfg(test)]
