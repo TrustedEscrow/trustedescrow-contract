@@ -3,7 +3,10 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Events, Ledger,
+    },
     token::{StellarAssetClient, TokenClient},
     xdr::ContractEvent,
     Bytes, BytesN, Env, Event, String,
@@ -129,6 +132,25 @@ impl Setup<'_> {
             .filter_by_contract(contract)
             .events()
             .to_vec()
+    }
+
+    fn ttl(&self) -> u32 {
+        self.env
+            .as_contract(&self.factory.address, || self.env.storage().instance().get_ttl())
+    }
+
+    fn token_ttl(&self, token: &Address) -> u32 {
+        self.env.as_contract(&self.factory.address, || {
+            self.env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::Token(token.clone()))
+        })
+    }
+
+    fn advance_ledgers(&self, ledgers: u32) {
+        let sequence = self.env.ledger().sequence();
+        self.env.ledger().set_sequence_number(sequence + ledgers);
     }
 
     fn event(&self, event: &impl Event) -> ContractEvent {
@@ -641,4 +663,94 @@ fn admin_transfer_emits_proposed_then_transferred() {
         s.events_of(&s.factory.address),
         std::vec![s.event(&transferred)]
     );
+}
+
+// --- Storage TTL ---------------------------------------------------------------
+
+#[test]
+fn admin_actions_restore_the_full_instance_ttl() {
+    // Hardcoded independently of TTL_EXTEND_TO, so this actually fails if
+    // that constant's arithmetic is ever wrong — asserting against the
+    // constant itself would trivially agree with whatever it computes to.
+    const EXPECTED_EXTEND_TO: u32 = 120 * 17_280;
+
+    let s = setup();
+    let full = s.ttl();
+    let max_ttl = s
+        .env
+        .as_contract(&s.factory.address, || s.env.storage().max_ttl());
+    assert_eq!(full, EXPECTED_EXTEND_TO.min(max_ttl));
+
+    s.advance_ledgers(full - 10);
+    assert_eq!(s.ttl(), 10);
+    // allow_token only touches persistent storage (the token entry); use a
+    // call that actually touches the Config instance entry.
+    s.factory.set_config(&s.factory.config());
+    assert_eq!(s.ttl(), full);
+}
+
+#[test]
+fn the_ttl_threshold_itself_is_thirty_days_not_just_nonzero() {
+    // Letting the TTL run down to 10 remaining (as the test above does)
+    // can't distinguish the real threshold (30 days of ledgers) from a
+    // much smaller wrong one — both are comfortably above 10, so
+    // extend_ttl's "below threshold" condition is true either way. This
+    // stops at a remaining TTL that only the *real* threshold is above.
+    const DAY_IN_LEDGERS: u32 = 17_280;
+    const EXPECTED_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
+    const REMAINING: u32 = EXPECTED_THRESHOLD - DAY_IN_LEDGERS; // still below the real threshold
+
+    let s = setup();
+    let full = s.ttl();
+    s.advance_ledgers(full - REMAINING);
+    assert_eq!(s.ttl(), REMAINING);
+    s.factory.set_config(&s.factory.config());
+    assert_eq!(s.ttl(), full);
+}
+
+#[test]
+fn allow_token_restores_the_full_persistent_ttl_of_the_token_entry() {
+    const EXPECTED_EXTEND_TO: u32 = 120 * 17_280;
+
+    let s = setup();
+    let full = s.token_ttl(&s.token);
+    let max_ttl = s
+        .env
+        .as_contract(&s.factory.address, || s.env.storage().max_ttl());
+    assert_eq!(full, EXPECTED_EXTEND_TO.min(max_ttl));
+
+    s.advance_ledgers(full - 10);
+    assert_eq!(s.token_ttl(&s.token), 10);
+    s.factory.allow_token(&s.token, &s.wide_limits());
+    assert_eq!(s.token_ttl(&s.token), full);
+}
+
+// --- Boundaries ------------------------------------------------------------------
+
+#[test]
+fn limits_with_min_equal_to_max_are_valid() {
+    // A token restricted to exactly one amount is a legitimate limit, not
+    // an error — only min > max should be rejected.
+    let s = setup();
+    s.factory.allow_token(
+        &s.token,
+        &Some(TokenLimits {
+            min_amount: 100,
+            max_amount: 100,
+        }),
+    );
+    let mut order = s.order(&Address::generate(&s.env));
+    order.amount = 100;
+    s.factory.create(&order, &s.salt(1));
+}
+
+#[test]
+fn fee_at_the_cap_is_accepted() {
+    // fee_above_cap_is_rejected only exercises MAX_FEE_BPS + 1; the cap
+    // itself must still be a valid, inclusive boundary.
+    let s = setup();
+    let mut config = s.factory.config();
+    config.fee_bps = MAX_FEE_BPS;
+    s.factory.set_config(&config);
+    assert_eq!(s.factory.config().fee_bps, MAX_FEE_BPS);
 }

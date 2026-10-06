@@ -1,2 +1,4 @@
 /target
 **/test_snapshots/
+/mutants.out/
+/mutants.out.old/

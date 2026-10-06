@@ -31,6 +31,19 @@ A release's WASM is exactly `make build`'s output on the tagged commit, with the
 
 Besides unit tests for every transition and deadline boundary, the escrow has a seeded randomised state-machine test that drives escrows through random call sequences and checks conservation, terminality and the two-sided release rule after every step. CI runs formatting, the WASM build, clippy and all tests on every push.
 
+### Mutation testing
+
+Coverage shows which lines ran; it doesn't show whether the tests would notice if those lines were wrong. [`cargo-mutants`](https://mutants.rs/) mutates the source (`>=` to `>` in a deadline check, `&&` to `||`, a function body to `()`, ...) and reruns the suite — a mutant the tests don't catch is a gap.
+
+```sh
+make build   # the factory tests need the real escrow WASM, same as always
+cargo mutants -p trustescrow-escrow -p trustescrow-factory -p trustescrow-code --copy-target true
+```
+
+`--copy-target true` matters here specifically: cargo-mutants tests each mutant in an isolated copy of the source tree, and without it that copy doesn't have `target/wasm32v1-none/release/trustescrow_escrow.wasm`, which `contracts/factory/src/test.rs` imports by path — the factory tests fail to compile in every mutant, for a reason that has nothing to do with the mutation itself.
+
+CI runs this weekly (and on `workflow_dispatch`) via [`.github/workflows/mutants.yml`](.github/workflows/mutants.yml) and uploads the report as an artifact.
+
 ## Lifecycle at a glance
 
 ```
