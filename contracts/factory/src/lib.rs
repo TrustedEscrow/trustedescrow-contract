@@ -135,29 +135,8 @@ impl Factory {
     /// escrow address is derived from the buyer and `salt`, so it is known
     /// before submission and no one else can claim it.
     pub fn create(env: Env, order: Order, salt: BytesN<32>) -> Address {
-        order.buyer.require_auth();
-        let limits = Self::token_limits(env.clone(), order.token.clone())
-            .unwrap_or_else(|| panic_with_error!(&env, Error::TokenNotAllowed));
-        if order.amount < limits.min_amount {
-            panic_with_error!(&env, Error::AmountTooSmall);
-        }
-        if order.amount > limits.max_amount {
-            panic_with_error!(&env, Error::AmountTooLarge);
-        }
-        let config = Self::config(env.clone());
-        let params = EscrowParams {
-            order: order.clone(),
-            arbitrator: config.arbitrator,
-            fee_bps: config.fee_bps,
-            fee_recipient: config.fee_recipient,
-            salt: salt.clone(),
-        };
-
-        let escrow = env
-            .deployer()
-            .with_current_contract(escrow_salt(&env, &order.buyer, &salt))
-            .deploy_v2(config.escrow_wasm_hash, (params,));
-        extend_instance_ttl(&env);
+        do_create(&env, order, salt)
+    }
 
     /// `create`, then `fund()` on the new escrow in the same transaction —
     /// one signature covering create -> fund -> token transfer, instead of
@@ -287,8 +266,13 @@ impl Factory {
 
 fn do_create(env: &Env, order: Order, salt: BytesN<32>) -> Address {
     order.buyer.require_auth();
-    if !Factory::is_token_allowed(env.clone(), order.token.clone()) {
-        panic_with_error!(env, Error::TokenNotAllowed);
+    let limits = Factory::token_limits(env.clone(), order.token.clone())
+        .unwrap_or_else(|| panic_with_error!(env, Error::TokenNotAllowed));
+    if order.amount < limits.min_amount {
+        panic_with_error!(env, Error::AmountTooSmall);
+    }
+    if order.amount > limits.max_amount {
+        panic_with_error!(env, Error::AmountTooLarge);
     }
     let config = Factory::config(env.clone());
     let params = EscrowParams {
