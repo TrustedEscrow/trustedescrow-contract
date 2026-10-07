@@ -6,11 +6,23 @@
 //! own arbitrator and fee at creation and has no setter.
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
-    panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
+    contracttype, panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env, String,
 };
 
 pub use trustescrow_types::{EscrowParams, Order, MAX_FEE_BPS};
+
+// `source_repo` is also what SEP-55 build verification looks for, matching
+// against the repository a tagged release's WASM was built from.
+contractmeta!(key = "binver", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(
+    key = "source_repo",
+    val = "https://github.com/TrustedEscrow/trustedescrow-contract"
+);
+contractmeta!(
+    key = "description",
+    val = "TrustEscrow factory: deploys one escrow instance per trade"
+);
 
 /// Just enough of the escrow's interface to call `fund` on one the factory
 /// just deployed. A minimal trait rather than depending on the escrow crate,
@@ -261,6 +273,11 @@ impl Factory {
             extend_persistent_ttl(&env, &key);
         }
         limits
+    }
+
+    /// The `trustescrow-factory` crate version this WASM was built from.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 }
 

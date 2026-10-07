@@ -31,19 +31,21 @@ A release's WASM is exactly `make build`'s output on the tagged commit, with the
 
 Besides unit tests for every transition and deadline boundary, the escrow has a seeded randomised state-machine test that drives escrows through random call sequences and checks conservation, terminality and the two-sided release rule after every step. CI runs formatting, the WASM build, clippy and all tests on every push.
 
-### Fuzzing
+### Identifying a deployed build
 
-`fuzz/` holds coverage-guided fuzz targets (cargo-fuzz / libFuzzer), separate from `test_invariants.rs`'s seeded-but-fixed randomised test: libFuzzer mutates towards inputs that reach *new* code paths instead of sampling uniformly. `escrow_state_machine` drives one escrow through a fuzzer-chosen sequence of calls and checks the exact same safety properties as `test_invariants.rs`, by calling the same shared, `testutils`-gated `trustescrow_escrow::invariants::check` — so the seeded test and the fuzzer can never silently disagree about what "safe" means.
-
-Needs nightly (`fuzz/rust-toolchain.toml` pins it — libFuzzer's instrumentation isn't available on the stable toolchain the contracts themselves build with) and `cargo install cargo-fuzz`:
+Both contracts embed their crate version, source repository and a short description as contract metadata, readable without a WASM hash lookup:
 
 ```sh
-cd fuzz
-cargo fuzz run escrow_state_machine              # until Ctrl-C
-cargo fuzz run escrow_state_machine -- -max_total_time=600   # or a fixed budget
+$ stellar contract info meta --wasm target/wasm32v1-none/release/trustescrow_escrow.wasm
+Contract meta:
+ • binver: 0.1.0
+ • description: TrustEscrow escrow contract: one instance per trade, two-sided release
+ • source_repo: https://github.com/TrustedEscrow/trustedescrow-contract
+ • rsver: 1.98.0 (Rust version)
+ • rssdkver: 27.0.6#60926a20d1f9f0a669d5fe551636f42a1302f0c0 (Soroban SDK version and its commit hash)
 ```
 
-A crash writes the failing input to `fuzz/artifacts/escrow_state_machine/`; rerun `cargo fuzz run escrow_state_machine <path>` to reproduce it under a debugger. CI runs every target nightly for ten minutes each ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) and uploads any crash as a workflow artifact — not on every push, since each target's ASan build is slow and needs a real time budget to find anything, neither of which belongs blocking a PR.
+`rsver`/`rssdkver` are added automatically by soroban-sdk; `binver`/`source_repo`/`description` are this repository's own. Each contract also exposes `version() -> String` on-chain, returning the same `binver`. The factory's metadata is identical apart from the description.
 
 ## Lifecycle at a glance
 
@@ -73,6 +75,16 @@ The escrow is only ever as good as the settlement token's own behaviour, which t
 
 **The factory admin must never allowlist a clawback-enabled asset.** There is no on-chain way for the contract to defend against its own balance being taken out from under it; refusing the asset at the allowlist is the only mitigation. `AUTH_REQUIRED` and `AUTH_REVOCABLE` assets are safe to allowlist — they can block a specific party's payout, but never both sides' exits at once, and never desynchronise the record from reality the way clawback can.
 
+## Factory upgrades
+
+The factory has no upgrade path, the same as an escrow has no admin and no setter. This was a deliberate choice, not an oversight: an upgradeable factory would let the admin key change factory *logic*, not just the arbitrator/fee/token-limit defaults it hands to new escrows — a materially bigger thing to trust a key (even an eventual multisig) with than "this key can't touch funds, only new-escrow defaults."
+
+The consequence is that fixing a factory bug, or adding something like `create_and_fund` or per-token limits, means deploying a **new factory with a new contract id**, not upgrading the old one. Escrows already created keep working exactly as before — they never call back into the factory for anything, so an old factory being superseded doesn't affect them. What it does mean:
+
+- **A network can have more than one factory id over its history.** `deployments/<network>-factories.json` lists every factory id a network has had, in order, with the escrow WASM hash it deployed and when it was superseded (`null` for the current one). `scripts/deploy-testnet.sh` doesn't manage this file automatically yet — append to it by hand after a redeploy.
+- **The provenance check only proves "deployed by *a* factory in that history," not "by the current one."** A client checking `factory.escrow_address(buyer, salt) == escrow_address` against only the *latest* factory id would wrongly reject a perfectly legitimate escrow created by a previous factory. A client doing this check needs to try every factory id in the network's history, not just the current one.
+- Backend and frontend configuration need to carry a list of known factory ids per network, not a single id, for the same reason.
+
 ## Deploying (testnet)
 
 With the [Stellar CLI](https://developers.stellar.org/docs/tools/cli) and a funded identity:
@@ -99,7 +111,7 @@ Handing the factory to a new admin takes two steps: the current admin calls `pro
 | Escrow WASM hash | `7a91c255c29edb7114a546026e807f144a8adc58460e4608e314a77ac629281d` |
 | Settlement token (test asset SAC) | `CBXMP6YK4B4WZKN4UAF7OZUEGFEUURVPSUQS5QGG5SG5DRWBRQDWAOOL` |
 
-`deployments/testnet.env` holds the same values plus the admin, arbitrator and fee recipient.
+`deployments/testnet.env` holds the same values plus the admin, arbitrator and fee recipient. `deployments/testnet-factories.json` holds the full history of factory ids testnet has had (see "Factory upgrades" above) — right now, one entry.
 
 This deployment predates the toolchain pin above, built with whatever was `stable` at the time; rebuilding it with a pinned compiler was attempted but did not reproduce the recorded hash, and the exact version originally used wasn't recoverable. The next testnet deploy will be built with the pinned toolchain, so its hash can be reproduced from here on.
 
