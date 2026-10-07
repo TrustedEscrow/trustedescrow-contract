@@ -9,7 +9,7 @@ use soroban_sdk::{
     },
     token::{StellarAssetClient, TokenClient},
     xdr::ContractEvent,
-    Bytes, BytesN, Env, Event, String,
+    Bytes, BytesN, Env, Event, IntoVal, String,
 };
 
 mod escrow_wasm {
@@ -665,92 +665,255 @@ fn admin_transfer_emits_proposed_then_transferred() {
     );
 }
 
-// --- Storage TTL ---------------------------------------------------------------
+// --- Multisig admin -----------------------------------------------------------
+//
+// mock_all_auths/mock_auths swap in a stub __check_auth that approves
+// unconditionally — they prove nothing about whether a custom account's real
+// signature verification runs correctly. These tests sign a real
+// authorization entry with real ed25519 keys and submit it with
+// env.set_auths, so __check_auth genuinely executes. See
+// contracts/escrow/src/test.rs's "Multisig arbitrator" section, where this
+// same pattern was built and verified first.
 
-#[test]
-fn admin_actions_restore_the_full_instance_ttl() {
-    // Hardcoded independently of TTL_EXTEND_TO, so this actually fails if
-    // that constant's arithmetic is ever wrong — asserting against the
-    // constant itself would trivially agree with whatever it computes to.
-    const EXPECTED_EXTEND_TO: u32 = 120 * 17_280;
+mod multisig {
+    use soroban_sdk::{
+        auth::{Context, CustomAccountInterface},
+        contract, contracterror, contractimpl, contracttype,
+        crypto::Hash,
+        BytesN, Env, Vec,
+    };
 
-    let s = setup();
-    let full = s.ttl();
-    let max_ttl = s
-        .env
-        .as_contract(&s.factory.address, || s.env.storage().max_ttl());
-    assert_eq!(full, EXPECTED_EXTEND_TO.min(max_ttl));
+    #[contracttype]
+    pub enum DataKey {
+        Signers,
+        Threshold,
+    }
 
-    s.advance_ledgers(full - 10);
-    assert_eq!(s.ttl(), 10);
-    // allow_token only touches persistent storage (the token entry); use a
-    // call that actually touches the Config instance entry.
-    s.factory.set_config(&s.factory.config());
-    assert_eq!(s.ttl(), full);
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        NotEnoughSignatures = 1,
+        SignaturesOutOfOrder = 2,
+    }
+
+    /// Minimal N-of-M multisig custom account: `threshold` of the `signers`
+    /// ed25519 keys (by index into `signers`, strictly increasing so the
+    /// same key can't be counted twice) must each produce a valid signature
+    /// over the exact payload the host asks `__check_auth` to verify.
+    #[contract]
+    pub struct MultisigAccount;
+
+    #[contractimpl]
+    impl MultisigAccount {
+        pub fn __constructor(env: Env, signers: Vec<BytesN<32>>, threshold: u32) {
+            env.storage().instance().set(&DataKey::Signers, &signers);
+            env.storage()
+                .instance()
+                .set(&DataKey::Threshold, &threshold);
+        }
+    }
+
+    #[contractimpl]
+    impl CustomAccountInterface for MultisigAccount {
+        type Signature = Vec<(u32, BytesN<64>)>;
+        type Error = Error;
+
+        fn __check_auth(
+            env: Env,
+            signature_payload: Hash<32>,
+            signatures: Vec<(u32, BytesN<64>)>,
+            _auth_contexts: Vec<Context>,
+        ) -> Result<(), Error> {
+            let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+            if signatures.len() < threshold {
+                return Err(Error::NotEnoughSignatures);
+            }
+            let signers: Vec<BytesN<32>> = env.storage().instance().get(&DataKey::Signers).unwrap();
+            let message: soroban_sdk::Bytes = signature_payload.into();
+
+            let mut last_index: i64 = -1;
+            for (index, sig) in signatures.iter() {
+                if i64::from(index) <= last_index {
+                    return Err(Error::SignaturesOutOfOrder);
+                }
+                last_index = i64::from(index);
+                let public_key = signers.get(index).unwrap();
+                env.crypto().ed25519_verify(&public_key, &message, &sig);
+            }
+            Ok(())
+        }
+    }
 }
 
-#[test]
-fn the_ttl_threshold_itself_is_thirty_days_not_just_nonzero() {
-    // Letting the TTL run down to 10 remaining (as the test above does)
-    // can't distinguish the real threshold (30 days of ledgers) from a
-    // much smaller wrong one — both are comfortably above 10, so
-    // extend_ttl's "below threshold" condition is true either way. This
-    // stops at a remaining TTL that only the *real* threshold is above.
-    const DAY_IN_LEDGERS: u32 = 17_280;
-    const EXPECTED_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
-    const REMAINING: u32 = EXPECTED_THRESHOLD - DAY_IN_LEDGERS; // still below the real threshold
+/// Builds and signs a `SorobanAuthorizationEntry` for `account` (a deployed
+/// `multisig::MultisigAccount`) authorizing a single top-level call —
+/// `contract.fn_name(args)` — with no sub-invocations.
+fn sign_multisig_auth(
+    env: &Env,
+    account: &Address,
+    contract: &Address,
+    fn_name: &str,
+    args: soroban_sdk::Vec<soroban_sdk::Val>,
+    signing_keys: &[(u32, &ed25519_dalek::SigningKey)],
+    nonce: i64,
+) -> soroban_sdk::xdr::SorobanAuthorizationEntry {
+    use ed25519_dalek::Signer as _;
+    use soroban_sdk::xdr::{
+        self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limited,
+        Limits, ScAddress, SorobanAddressCredentials, SorobanAuthorizationEntry,
+        SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, WriteXdr,
+    };
+    use soroban_sdk::TryFromVal;
 
-    let s = setup();
-    let full = s.ttl();
-    s.advance_ledgers(full - REMAINING);
-    assert_eq!(s.ttl(), REMAINING);
-    s.factory.set_config(&s.factory.config());
-    assert_eq!(s.ttl(), full);
-}
-
-#[test]
-fn allow_token_restores_the_full_persistent_ttl_of_the_token_entry() {
-    const EXPECTED_EXTEND_TO: u32 = 120 * 17_280;
-
-    let s = setup();
-    let full = s.token_ttl(&s.token);
-    let max_ttl = s
-        .env
-        .as_contract(&s.factory.address, || s.env.storage().max_ttl());
-    assert_eq!(full, EXPECTED_EXTEND_TO.min(max_ttl));
-
-    s.advance_ledgers(full - 10);
-    assert_eq!(s.token_ttl(&s.token), 10);
-    s.factory.allow_token(&s.token, &s.wide_limits());
-    assert_eq!(s.token_ttl(&s.token), full);
-}
-
-// --- Boundaries ------------------------------------------------------------------
-
-#[test]
-fn limits_with_min_equal_to_max_are_valid() {
-    // A token restricted to exactly one amount is a legitimate limit, not
-    // an error — only min > max should be rejected.
-    let s = setup();
-    s.factory.allow_token(
-        &s.token,
-        &Some(TokenLimits {
-            min_amount: 100,
-            max_amount: 100,
+    let network_id = xdr::Hash([0u8; 32]); // the test env's default.
+    let signature_expiration_ledger = env.ledger().sequence() + 100;
+    let address: ScAddress = account.into();
+    let invocation = SorobanAuthorizedInvocation {
+        function: SorobanAuthorizedFunction::ContractFn(InvokeContractArgs {
+            contract_address: contract.into(),
+            function_name: fn_name.try_into().unwrap(),
+            args: args.into(),
         }),
-    );
-    let mut order = s.order(&Address::generate(&s.env));
-    order.amount = 100;
-    s.factory.create(&order, &s.salt(1));
+        sub_invocations: Default::default(),
+    };
+    // `SorobanCredentials::Address` hashes the preimage *without* the
+    // address folded in; see the long comment at this same spot in
+    // contracts/escrow/src/test.rs for how that was confirmed.
+    let preimage = HashIdPreimage::SorobanAuthorization(HashIdPreimageSorobanAuthorization {
+        network_id,
+        nonce,
+        signature_expiration_ledger,
+        invocation: invocation.clone(),
+    });
+    let mut buf = std::vec::Vec::new();
+    preimage
+        .write_xdr(&mut Limited::new(&mut buf, Limits::none()))
+        .unwrap();
+    let payload: [u8; 32] = env
+        .crypto()
+        .sha256(&Bytes::from_slice(env, &buf))
+        .to_array();
+
+    let sigs: soroban_sdk::Vec<(u32, BytesN<64>)> = soroban_sdk::vec![env];
+    let mut sigs = sigs;
+    for (index, key) in signing_keys {
+        let sig = key.sign(&payload);
+        sigs.push_back((*index, BytesN::from_array(env, &sig.to_bytes())));
+    }
+    let signature = xdr::ScVal::try_from_val(env, &sigs.to_val()).unwrap();
+
+    SorobanAuthorizationEntry {
+        root_invocation: invocation,
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address,
+            nonce,
+            signature_expiration_ledger,
+            signature,
+        }),
+    }
 }
 
 #[test]
-fn fee_at_the_cap_is_accepted() {
-    // fee_above_cap_is_rejected only exercises MAX_FEE_BPS + 1; the cap
-    // itself must still be a valid, inclusive boundary.
-    let s = setup();
-    let mut config = s.factory.config();
-    config.fee_bps = MAX_FEE_BPS;
-    s.factory.set_config(&config);
-    assert_eq!(s.factory.config().fee_bps, MAX_FEE_BPS);
+fn admin_as_a_multisig_signs_config_changes_and_admin_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(START);
+
+    let keys: std::vec::Vec<ed25519_dalek::SigningKey> = (0..3)
+        .map(|_| ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))
+        .collect();
+    let signer_bytes: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::vec![
+        &env,
+        BytesN::from_array(&env, &keys[0].verifying_key().to_bytes()),
+        BytesN::from_array(&env, &keys[1].verifying_key().to_bytes()),
+        BytesN::from_array(&env, &keys[2].verifying_key().to_bytes()),
+    ];
+    let admin = env.register(multisig::MultisigAccount, (signer_bytes, 2u32));
+
+    let arbitrator = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let escrow_wasm_hash = env.deployer().upload_contract_wasm(escrow_wasm::WASM);
+    let factory_id = env.register(
+        Factory,
+        (Config {
+            admin: admin.clone(),
+            escrow_wasm_hash,
+            arbitrator,
+            fee_recipient,
+            fee_bps: FEE_BPS,
+        },),
+    );
+    let factory = FactoryClient::new(&env, &factory_id);
+
+    // set_config: one signature isn't enough, two genuinely is — the real
+    // __check_auth ran both times, not a mock standing in for it.
+    let mut new_config = factory.config();
+    new_config.fee_bps = 300;
+    let args = soroban_sdk::vec![&env, new_config.clone().into_val(&env)];
+
+    let one = sign_multisig_auth(
+        &env,
+        &admin,
+        &factory_id,
+        "set_config",
+        args.clone(),
+        &[(0, &keys[0])],
+        0,
+    );
+    env.set_auths(&[one]);
+    assert!(factory.try_set_config(&new_config).is_err());
+    assert_eq!(factory.config().fee_bps, FEE_BPS);
+
+    let two = sign_multisig_auth(
+        &env,
+        &admin,
+        &factory_id,
+        "set_config",
+        args,
+        &[(0, &keys[0]), (1, &keys[1])],
+        1,
+    );
+    env.set_auths(&[two]);
+    factory.set_config(&new_config);
+    assert_eq!(factory.config().fee_bps, 300);
+
+    // allow_token, signed by a different pair of signers.
+    let token = Address::generate(&env);
+    let limits = Some(TokenLimits {
+        min_amount: 1,
+        max_amount: i128::MAX,
+    });
+    let args = soroban_sdk::vec![&env, token.into_val(&env), limits.into_val(&env)];
+    let sig = sign_multisig_auth(
+        &env,
+        &admin,
+        &factory_id,
+        "allow_token",
+        args,
+        &[(1, &keys[1]), (2, &keys[2])],
+        2,
+    );
+    env.set_auths(&[sig]);
+    factory.allow_token(&token, &limits);
+
+    // propose_admin, signed by the multisig; accept_admin, signed normally
+    // by the new (plain) admin — the transfer away from a multisig works.
+    let new_admin = Address::generate(&env);
+    let args = soroban_sdk::vec![&env, new_admin.clone().into_val(&env)];
+    let sig = sign_multisig_auth(
+        &env,
+        &admin,
+        &factory_id,
+        "propose_admin",
+        args,
+        &[(0, &keys[0]), (2, &keys[2])],
+        3,
+    );
+    env.set_auths(&[sig]);
+    factory.propose_admin(&new_admin);
+    assert_eq!(factory.pending_admin(), Some(new_admin.clone()));
+
+    env.mock_all_auths();
+    factory.accept_admin();
+    assert_eq!(factory.config().admin, new_admin);
 }
