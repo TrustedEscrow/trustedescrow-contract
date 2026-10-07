@@ -292,6 +292,15 @@ fn bump_is_permissionless() {
     assert!(s.env.auths().is_empty());
 }
 
+#[test]
+fn version_matches_the_crate_version() {
+    let s = setup();
+    assert_eq!(
+        s.escrow.version(),
+        String::from_str(&s.env, env!("CARGO_PKG_VERSION"))
+    );
+}
+
 fn register_with(mutate: impl FnOnce(&mut EscrowParams)) {
     let env = new_env();
     let mut params = default_params(&env);

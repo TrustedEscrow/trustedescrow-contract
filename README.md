@@ -31,6 +31,22 @@ A release's WASM is exactly `make build`'s output on the tagged commit, with the
 
 Besides unit tests for every transition and deadline boundary, the escrow has a seeded randomised state-machine test that drives escrows through random call sequences and checks conservation, terminality and the two-sided release rule after every step. CI runs formatting, the WASM build, clippy and all tests on every push.
 
+### Identifying a deployed build
+
+Both contracts embed their crate version, source repository and a short description as contract metadata, readable without a WASM hash lookup:
+
+```sh
+$ stellar contract info meta --wasm target/wasm32v1-none/release/trustescrow_escrow.wasm
+Contract meta:
+ • binver: 0.1.0
+ • description: TrustEscrow escrow contract: one instance per trade, two-sided release
+ • source_repo: https://github.com/TrustedEscrow/trustedescrow-contract
+ • rsver: 1.98.0 (Rust version)
+ • rssdkver: 27.0.6#60926a20d1f9f0a669d5fe551636f42a1302f0c0 (Soroban SDK version and its commit hash)
+```
+
+`rsver`/`rssdkver` are added automatically by soroban-sdk; `binver`/`source_repo`/`description` are this repository's own. Each contract also exposes `version() -> String` on-chain, returning the same `binver`. The factory's metadata is identical apart from the description.
+
 ## Lifecycle at a glance
 
 ```
