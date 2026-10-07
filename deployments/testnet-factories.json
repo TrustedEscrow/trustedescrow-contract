@@ -3,6 +3,13 @@
     "factory_id": "CDMCI4VW5XARBPITNHNENEDVKBMKDICFCKJJ3RYDAKDBZRQMGPUV5JIO",
     "escrow_wasm_hash": "7a91c255c29edb7114a546026e807f144a8adc58460e4608e314a77ac629281d",
     "deployed_at": "2026-09-16",
+    "superseded_at": "2026-10-07",
+    "note": "superseded — predates salt/factory-provenance, unswept_fee, dispute/ruling hash commitments, extend_delivery/extend_receipt and create_and_fund"
+  },
+  {
+    "factory_id": "CDBD65SK43MNCD5JW7HXXV3EMG2OH2UJ3FKJ2O6OEQINV7NJZOIUQMRP",
+    "escrow_wasm_hash": "2589c9a9876bd2940b8f4dc8ce2b13aa2c654601a066d27f58f254d6b45473aa",
+    "deployed_at": "2026-10-07",
     "superseded_at": null,
     "note": "current — matches deployments/testnet.env"
   }

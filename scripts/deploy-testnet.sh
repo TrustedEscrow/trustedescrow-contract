@@ -53,11 +53,7 @@ FACTORY_ID=$(stellar contract deploy \
 
 echo "Allowlisting settlement token..."
 # `limits` is Option<TokenLimits>; a JSON object means Some, as with
-# `--config` above. Not verified against a live network in the PR that added
-# it (#5) — no local Stellar node was available to confirm the CLI's exact
-# flag generation for an optional struct argument, so if this errors, check
-# `stellar contract invoke --id "$FACTORY_ID" --network "$NETWORK" --source
-# "$SOURCE" -- allow_token --help` and adjust.
+# `--config` above. Verified against testnet on the 2026-10-07 redeploy.
 stellar contract invoke --id "$FACTORY_ID" \
   --source "$SOURCE" --network "$NETWORK" \
   -- allow_token --token "$TOKEN" \
