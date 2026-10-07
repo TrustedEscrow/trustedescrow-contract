@@ -1,0 +1,26 @@
+[package]
+name = "trustescrow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standalone, not a member of the parent repo's workspace — cargo-fuzz's
+# sanitizer build needs its own target directory and flags.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+trustescrow-types = { path = "../crates/types", features = ["testutils"] }
+trustescrow-escrow = { path = "../contracts/escrow", features = ["testutils"] }
+
+[[bin]]
+name = "escrow_state_machine"
+path = "fuzz_targets/escrow_state_machine.rs"
+test = false
+doc = false
+bench = false

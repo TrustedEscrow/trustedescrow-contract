@@ -1,0 +1,5 @@
+[toolchain]
+# cargo-fuzz's libFuzzer/ASan instrumentation needs nightly, unlike the rest
+# of this repo (see the root rust-toolchain.toml) — only the fuzz targets
+# are built this way, never the deployed contracts.
+channel = "nightly"
