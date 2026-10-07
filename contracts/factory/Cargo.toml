@@ -17,6 +17,10 @@ trustescrow-types = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 trustescrow-types = { workspace = true, features = ["testutils"] }
+# For signing real authorization entries in the multisig admin test — see
+# the same note in contracts/escrow/Cargo.toml.
+ed25519-dalek = "2"
+rand = "0.8"
 
 [features]
 testutils = ["soroban-sdk/testutils", "trustescrow-types/testutils"]

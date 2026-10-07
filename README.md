@@ -33,16 +33,21 @@ A release's WASM is exactly `make build`'s output on the tagged commit, with the
 
 Besides unit tests for every transition and deadline boundary, the escrow has a seeded randomised state-machine test that drives escrows through random call sequences and checks conservation, terminality and the two-sided release rule after every step. CI runs formatting, the WASM build, clippy and all tests on every push.
 
-### Code coverage
+### Identifying a deployed build
 
-[`.github/workflows/coverage.yml`](.github/workflows/coverage.yml) measures line coverage for `trustescrow-escrow`, `trustescrow-factory` and `trustescrow-code` with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) on every push and pull request, and uploads the report as a workflow artifact. Reproduce locally with:
+Both contracts embed their crate version, source repository and a short description as contract metadata, readable without a WASM hash lookup:
 
 ```sh
-make build   # the factory tests need the real escrow WASM, same as always
-cargo llvm-cov -p trustescrow-escrow -p trustescrow-factory -p trustescrow-code --summary-only
+$ stellar contract info meta --wasm target/wasm32v1-none/release/trustescrow_escrow.wasm
+Contract meta:
+ • binver: 0.1.0
+ • description: TrustEscrow escrow contract: one instance per trade, two-sided release
+ • source_repo: https://github.com/TrustedEscrow/trustedescrow-contract
+ • rsver: 1.98.0 (Rust version)
+ • rssdkver: 27.0.6#60926a20d1f9f0a669d5fe551636f42a1302f0c0 (Soroban SDK version and its commit hash)
 ```
 
-The workflow doesn't fail the build below a minimum yet. That gate needs a real baseline run first — the actual current number, rounded down, not a guessed target — which this change doesn't include; see the `TODO(#15)` in the workflow file.
+`rsver`/`rssdkver` are added automatically by soroban-sdk; `binver`/`source_repo`/`description` are this repository's own. Each contract also exposes `version() -> String` on-chain, returning the same `binver`. The factory's metadata is identical apart from the description.
 
 ## Lifecycle at a glance
 
@@ -72,6 +77,16 @@ The escrow is only ever as good as the settlement token's own behaviour, which t
 
 **The factory admin must never allowlist a clawback-enabled asset.** There is no on-chain way for the contract to defend against its own balance being taken out from under it; refusing the asset at the allowlist is the only mitigation. `AUTH_REQUIRED` and `AUTH_REVOCABLE` assets are safe to allowlist — they can block a specific party's payout, but never both sides' exits at once, and never desynchronise the record from reality the way clawback can.
 
+## Factory upgrades
+
+The factory has no upgrade path, the same as an escrow has no admin and no setter. This was a deliberate choice, not an oversight: an upgradeable factory would let the admin key change factory *logic*, not just the arbitrator/fee/token-limit defaults it hands to new escrows — a materially bigger thing to trust a key (even an eventual multisig) with than "this key can't touch funds, only new-escrow defaults."
+
+The consequence is that fixing a factory bug, or adding something like `create_and_fund` or per-token limits, means deploying a **new factory with a new contract id**, not upgrading the old one. Escrows already created keep working exactly as before — they never call back into the factory for anything, so an old factory being superseded doesn't affect them. What it does mean:
+
+- **A network can have more than one factory id over its history.** `deployments/<network>-factories.json` lists every factory id a network has had, in order, with the escrow WASM hash it deployed and when it was superseded (`null` for the current one). `scripts/deploy-testnet.sh` doesn't manage this file automatically yet — append to it by hand after a redeploy.
+- **The provenance check only proves "deployed by *a* factory in that history," not "by the current one."** A client checking `factory.escrow_address(buyer, salt) == escrow_address` against only the *latest* factory id would wrongly reject a perfectly legitimate escrow created by a previous factory. A client doing this check needs to try every factory id in the network's history, not just the current one.
+- Backend and frontend configuration need to carry a list of known factory ids per network, not a single id, for the same reason.
+
 ## Deploying (testnet)
 
 With the [Stellar CLI](https://developers.stellar.org/docs/tools/cli) and a funded identity:
@@ -98,7 +113,7 @@ Handing the factory to a new admin takes two steps: the current admin calls `pro
 | Escrow WASM hash | `7a91c255c29edb7114a546026e807f144a8adc58460e4608e314a77ac629281d` |
 | Settlement token (test asset SAC) | `CBXMP6YK4B4WZKN4UAF7OZUEGFEUURVPSUQS5QGG5SG5DRWBRQDWAOOL` |
 
-`deployments/testnet.env` holds the same values plus the admin, arbitrator and fee recipient.
+`deployments/testnet.env` holds the same values plus the admin, arbitrator and fee recipient. `deployments/testnet-factories.json` holds the full history of factory ids testnet has had (see "Factory upgrades" above) — right now, one entry.
 
 This deployment predates the toolchain pin above, built with whatever was `stable` at the time; rebuilding it with a pinned compiler was attempted but did not reproduce the recorded hash, and the exact version originally used wasn't recoverable. The next testnet deploy will be built with the pinned toolchain, so its hash can be reproduced from here on.
 

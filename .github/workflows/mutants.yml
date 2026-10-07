@@ -1,0 +1,52 @@
+name: Mutants
+
+# Mutation testing (cargo-mutants): mutates the contract source (e.g. `>=`
+# to `>` in a deadline check) and checks whether the test suite notices.
+# Coverage shows which lines run; this shows whether the tests would catch
+# it if those lines were wrong. Not on every push — a full run builds and
+# tests the workspace once per mutant, which takes much longer than the
+# normal CI job.
+on:
+  schedule:
+    - cron: "0 4 * * 1" # 04:00 UTC every Monday
+  workflow_dispatch: {}
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel, target and components.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      # The factory tests deploy the real escrow WASM, so build it first —
+      # same ordering constraint as the main CI job and the Makefile.
+      - name: Build WASM
+        run: make build
+
+      # --copy-target true matters: cargo-mutants tests each mutant in an
+      # isolated copy of the tree, and without the existing target/ dir
+      # copied in, that copy has no trustescrow_escrow.wasm for the factory
+      # tests to import — every mutant fails to compile for a reason that
+      # has nothing to do with the mutation. Found this the hard way.
+      - name: Run mutants
+        run: |
+          cargo mutants -p trustescrow-escrow -p trustescrow-factory -p trustescrow-code \
+            --copy-target true --jobs 2 --timeout 120 --no-shuffle
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants.out
+          if-no-files-found: ignore
