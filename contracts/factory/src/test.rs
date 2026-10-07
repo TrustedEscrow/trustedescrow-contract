@@ -3,7 +3,10 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Events, Ledger,
+    },
     token::{StellarAssetClient, TokenClient},
     xdr::ContractEvent,
     Bytes, BytesN, Env, Event, IntoVal, String,
@@ -129,6 +132,25 @@ impl Setup<'_> {
             .filter_by_contract(contract)
             .events()
             .to_vec()
+    }
+
+    fn ttl(&self) -> u32 {
+        self.env
+            .as_contract(&self.factory.address, || self.env.storage().instance().get_ttl())
+    }
+
+    fn token_ttl(&self, token: &Address) -> u32 {
+        self.env.as_contract(&self.factory.address, || {
+            self.env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::Token(token.clone()))
+        })
+    }
+
+    fn advance_ledgers(&self, ledgers: u32) {
+        let sequence = self.env.ledger().sequence();
+        self.env.ledger().set_sequence_number(sequence + ledgers);
     }
 
     fn event(&self, event: &impl Event) -> ContractEvent {
