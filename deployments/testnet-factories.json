@@ -1,0 +1,9 @@
+[
+  {
+    "factory_id": "CDMCI4VW5XARBPITNHNENEDVKBMKDICFCKJJ3RYDAKDBZRQMGPUV5JIO",
+    "escrow_wasm_hash": "7a91c255c29edb7114a546026e807f144a8adc58460e4608e314a77ac629281d",
+    "deployed_at": "2026-09-16",
+    "superseded_at": null,
+    "note": "current — matches deployments/testnet.env"
+  }
+]
