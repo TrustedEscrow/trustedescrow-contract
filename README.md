@@ -1,5 +1,7 @@
 # TrustEscrow contracts
 
+[![Coverage](https://github.com/TrustedEscrow/trustedescrow-contract/actions/workflows/coverage.yml/badge.svg)](https://github.com/TrustedEscrow/trustedescrow-contract/actions/workflows/coverage.yml)
+
 Soroban contracts for TrustEscrow, a peer-to-peer escrow for online trade between strangers.
 
 A buyer deposits, the seller proves delivery on-chain, the buyer proves receipt (by handing over a delivery code or signing a confirmation), and only then is the seller paid. No timeout ever pays the seller: a silent buyer escalates to an arbitrator, and an arbitrator who doesn't rule in time refunds the buyer.
