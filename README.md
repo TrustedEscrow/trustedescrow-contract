@@ -1,9 +1,10 @@
 # TrustEscrow contracts
 
 [![Coverage](https://github.com/TrustedEscrow/trustedescrow-contract/actions/workflows/coverage.yml/badge.svg)](https://github.com/TrustedEscrow/trustedescrow-contract/actions/workflows/coverage.yml)
-[![Vercel Deployment](https://img.shields.io/badge/Vercel-Live_Frontend-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://trustedescrow-frontend.vercel.app)
+[![Vercel Deployment](https://img.shields.io/badge/Vercel-Live_Frontend-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://trustedescrow-frontend-kcp12updd-mubylateef.vercel.app)
 
-> 🚀 **Live Frontend App**: [https://trustedescrow-frontend.vercel.app](https://trustedescrow-frontend.vercel.app)
+> 🚀 **Live Frontend App**: [https://trustedescrow-frontend-kcp12updd-mubylateef.vercel.app](https://trustedescrow-frontend-kcp12updd-mubylateef.vercel.app)  
+> *(Alias: [https://trustedescrow-frontend-eta.vercel.app](https://trustedescrow-frontend-eta.vercel.app))*
 
 Soroban contracts for TrustEscrow, a peer-to-peer escrow for online trade between strangers.
 
