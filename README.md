@@ -109,15 +109,19 @@ Handing the factory to a new admin takes two steps: the current admin calls `pro
 
 | What | Id |
 |---|---|
-| Factory | `CDMCI4VW5XARBPITNHNENEDVKBMKDICFCKJJ3RYDAKDBZRQMGPUV5JIO` |
-| Escrow WASM hash | `7a91c255c29edb7114a546026e807f144a8adc58460e4608e314a77ac629281d` |
-| Settlement token (test asset SAC) | `CBXMP6YK4B4WZKN4UAF7OZUEGFEUURVPSUQS5QGG5SG5DRWBRQDWAOOL` |
+| Factory | `CDBD65SK43MNCD5JW7HXXV3EMG2OH2UJ3FKJ2O6OEQINV7NJZOIUQMRP` |
+| Escrow WASM hash | `2589c9a9876bd2940b8f4dc8ce2b13aa2c654601a066d27f58f254d6b45473aa` |
+| Settlement token (testnet USDC SAC) | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
+| Allowlisted amount range | 1 – 10,000,000,000 (7-decimal units; up to 1,000 USDC) |
+| Fee | 150 bps (1.5%) |
 
-`deployments/testnet.env` holds the same values plus the admin, arbitrator and fee recipient. `deployments/testnet-factories.json` holds the full history of factory ids testnet has had (see "Factory upgrades" above) — right now, one entry.
+`deployments/testnet.env` holds the same values plus the admin, arbitrator and fee recipient. `deployments/testnet-factories.json` holds the full history — the previous factory above is now `superseded_at`, this one is current.
 
-This deployment predates the toolchain pin above, built with whatever was `stable` at the time; rebuilding it with a pinned compiler was attempted but did not reproduce the recorded hash, and the exact version originally used wasn't recoverable. The next testnet deploy will be built with the pinned toolchain, so its hash can be reproduced from here on.
+Redeployed from this toolchain-pinned `main` (replacing the 2026-09-16 deployment, which predated `salt`/factory-provenance, `unswept_fee`, the dispute/ruling hash commitments, `extend_delivery`/`extend_receipt`, `create_and_fund` and the `version()`/`contractmeta!` metadata — none of which the old escrow WASM had). Built with the pinned 1.98.0 toolchain and confirmed reproducible: a from-scratch rebuild on the same toolchain produced the identical hash above.
 
-One escrow has been run end to end against this deployment: [create](https://stellar.expert/explorer/testnet/tx/16515feb9764f9ef3021bdbd20744c01d467ce6eee22a8cb31d038b964589e7d), [fund](https://stellar.expert/explorer/testnet/tx/8e305e4323098a99564e985e3ca671e805219ae66250d1e3b17d42a5e15c1c02), [submit_proof](https://stellar.expert/explorer/testnet/tx/48c038bed1a5c6d8428339902cd74d54077cc7c494a51ba3499658db7e1b875a), then release with the buyer's delivery code. Of 100 units deposited the seller received 98.5 and the fee recipient 1.5, and the escrow ended `Released` via `Code` holding nothing.
+No end-to-end trade has been run against this deployment yet (the previous README note about one was for the superseded deployment). Run one and update this section once the backend/frontend are pointed at these new ids.
+
+**Known gap, not yet fixed:** per "Factory upgrades" above, a provenance check should try every factory id in a network's history, and backend/frontend config should carry the list, not a single id. Right now both only take one `FACTORY_CONTRACT_ID`. This doesn't block using the current factory — it only matters for escrows created by a superseded one, and this network has none from the superseded factory to support — but it's a real gap worth its own issue in both repos.
 
 ## License
 
