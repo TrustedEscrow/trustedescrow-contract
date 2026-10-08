@@ -135,8 +135,9 @@ impl Setup<'_> {
     }
 
     fn ttl(&self) -> u32 {
-        self.env
-            .as_contract(&self.factory.address, || self.env.storage().instance().get_ttl())
+        self.env.as_contract(&self.factory.address, || {
+            self.env.storage().instance().get_ttl()
+        })
     }
 
     fn token_ttl(&self, token: &Address) -> u32 {
@@ -916,4 +917,78 @@ fn admin_as_a_multisig_signs_config_changes_and_admin_transfer() {
     env.mock_all_auths();
     factory.accept_admin();
     assert_eq!(factory.config().admin, new_admin);
+}
+
+// --- TTL bookkeeping -------------------------------------------------------------
+//
+// Nothing fails at the time if these stop extending: the entry simply goes archived
+// months later, and an escrow that can no longer be created or looked up is a much
+// worse failure than a red test. `ttl_bounds` caps the extension at the network's
+// max_ttl, so the expectations below are derived the same way rather than hardcoded.
+
+/// Ledgers to burn to drop a freshly extended entry just below the extend threshold.
+fn decay_to_just_under_threshold(env: &Env) -> u32 {
+    let extend_to = TTL_EXTEND_TO.min(env.storage().max_ttl());
+    let threshold = TTL_THRESHOLD.min(extend_to);
+    extend_to - threshold + 1
+}
+
+#[test]
+fn a_write_extends_the_instance_ttl() {
+    let s = setup();
+    let extend_to = TTL_EXTEND_TO.min(s.env.storage().max_ttl());
+    assert_eq!(s.ttl(), extend_to);
+
+    s.advance_ledgers(decay_to_just_under_threshold(&s.env));
+    let decayed = s.ttl();
+    assert!(
+        decayed < TTL_THRESHOLD.min(extend_to),
+        "should now be under the threshold"
+    );
+
+    // Any write goes through write_config/extend_instance_ttl.
+    s.factory.propose_admin(&Address::generate(&s.env));
+    assert_eq!(
+        s.ttl(),
+        extend_to,
+        "a write should put the instance back to the full extension"
+    );
+}
+
+#[test]
+fn creating_an_escrow_extends_the_instance_ttl() {
+    let s = setup();
+    let extend_to = TTL_EXTEND_TO.min(s.env.storage().max_ttl());
+    s.advance_ledgers(decay_to_just_under_threshold(&s.env));
+    assert!(s.ttl() < extend_to);
+
+    let buyer = Address::generate(&s.env);
+    s.factory
+        .create(&s.order(&buyer), &BytesN::from_array(&s.env, &[9; 32]));
+    assert_eq!(s.ttl(), extend_to);
+}
+
+#[test]
+fn allowing_and_reading_a_token_extends_that_entry_ttl() {
+    let s = setup();
+    let extend_to = TTL_EXTEND_TO.min(s.env.storage().max_ttl());
+    assert_eq!(s.token_ttl(&s.token), extend_to);
+
+    // A read extends it too: token_limits is on the hot path for every create.
+    s.advance_ledgers(decay_to_just_under_threshold(&s.env));
+    assert!(s.token_ttl(&s.token) < extend_to);
+    s.factory.token_limits(&s.token);
+    assert_eq!(s.token_ttl(&s.token), extend_to);
+
+    // And so does re-allowing it.
+    s.advance_ledgers(decay_to_just_under_threshold(&s.env));
+    assert!(s.token_ttl(&s.token) < extend_to);
+    s.factory.allow_token(
+        &s.token,
+        &Some(TokenLimits {
+            min_amount: 1,
+            max_amount: i128::MAX,
+        }),
+    );
+    assert_eq!(s.token_ttl(&s.token), extend_to);
 }
