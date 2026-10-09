@@ -127,6 +127,22 @@ No end-to-end trade has been run against this deployment yet (the previous READM
 
 **Known gap, not yet fixed:** per "Factory upgrades" above, a provenance check should try every factory id in a network's history, and backend/frontend config should carry the list, not a single id. Right now both only take one `FACTORY_CONTRACT_ID`. This doesn't block using the current factory — it only matters for escrows created by a superseded one, and this network has none from the superseded factory to support — but it's a real gap worth its own issue in both repos.
 
+## Contributing
+
+New contributors start with [CONTRIBUTING.md](https://github.com/TrustedEscrow/trustedescrow-docs/blob/main/CONTRIBUTING.md) in the
+docs repository. It covers all four repositories in one place: prerequisites, cloning
+them side by side, building and testing each one, and which configuration value flows
+from which repository into the next.
+
+Issues in this repository are written to be picked up cold. Each states what is wrong
+or missing and why it matters, rather than only what to type. Work lands through forks
+and pull requests against `main`.
+
+Wider context lives in the same repository: [ARCHITECTURE.md](https://github.com/TrustedEscrow/trustedescrow-docs/blob/main/ARCHITECTURE.md)
+for the system design, [THREAT_MODEL.md](https://github.com/TrustedEscrow/trustedescrow-docs/blob/main/THREAT_MODEL.md) for what is
+trustless and what is not, and [GOVERNANCE.md](https://github.com/TrustedEscrow/trustedescrow-docs/blob/main/GOVERNANCE.md) for how
+decisions get made.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
